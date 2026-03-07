@@ -165,6 +165,20 @@ export namespace Question {
     }
   }
 
+  export async function rejectSession(sessionID: string): Promise<void> {
+    const s = await state()
+    for (const [id, pending] of Object.entries(s.pending)) {
+      if (pending.info.sessionID !== sessionID) continue
+      delete s.pending[id]
+      log.info("rejecting for cancelled session", { requestID: id, sessionID })
+      Bus.publish(Event.Rejected, {
+        sessionID: pending.info.sessionID,
+        requestID: pending.info.id,
+      })
+      pending.reject(new RejectedError())
+    }
+  }
+
   export async function list() {
     return state().then((x) => Object.values(x.pending).map((x) => x.info))
   }

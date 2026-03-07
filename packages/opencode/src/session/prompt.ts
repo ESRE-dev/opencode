@@ -40,6 +40,7 @@ import { SessionProcessor } from "./processor"
 import { TaskTool } from "@/tool/task"
 import { Tool } from "@/tool/tool"
 import { PermissionNext } from "@/permission/next"
+import { Question } from "@/question"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
 import { iife } from "@/util/iife"
@@ -263,6 +264,9 @@ export namespace SessionPrompt {
     }
     match.abort.abort()
     delete s[sessionID]
+    // Reject any pending permission/question promises so tool calls unblock
+    PermissionNext.rejectSession(sessionID).catch(() => {})
+    Question.rejectSession(sessionID).catch(() => {})
     SessionStatus.set(sessionID, { type: "idle" })
     return
   }
@@ -433,11 +437,16 @@ export namespace SessionPrompt {
             } satisfies MessageV2.ToolPart)
           },
           async ask(req) {
-            await PermissionNext.ask({
+            const permission = PermissionNext.ask({
               ...req,
               sessionID: sessionID,
               ruleset: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
             })
+            if (abort.aborted) throw new DOMException("Aborted", "AbortError")
+            const aborted = new Promise<never>((_, reject) => {
+              abort.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true })
+            })
+            await Promise.race([permission, aborted])
           },
         }
         const result = await taskTool.execute(taskArgs, taskCtx).catch((error) => {
@@ -771,12 +780,18 @@ export namespace SessionPrompt {
         }
       },
       async ask(req) {
-        await PermissionNext.ask({
+        const signal = options.abortSignal
+        const permission = PermissionNext.ask({
           ...req,
           sessionID: input.session.id,
           tool: { messageID: input.processor.message.id, callID: options.toolCallId },
           ruleset: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
         })
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError")
+        const aborted = new Promise<never>((_, reject) => {
+          signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true })
+        })
+        await Promise.race([permission, aborted])
       },
     })
 
