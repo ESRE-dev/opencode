@@ -219,7 +219,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         }
         // Non-timeout, non-abort error — surface the actual failure
         cancel()
-        const msg = e instanceof Error ? e.message : String(e)
+        const reason = e instanceof Error ? e.message : String(e)
         return {
           title: params.description,
           metadata: {
@@ -227,7 +227,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
             model,
           },
           output: [
-            `ERROR: Task failed: ${msg}`,
+            `ERROR: Task failed: ${reason}`,
             `task_id: ${session.id}`,
             "",
             "You can resume this task by passing the task_id above, or try a different approach.",
