@@ -198,8 +198,28 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         deadline.clearTimeout()
         // If parent was aborted (user Ctrl+C), re-throw — don't mask it
         if (ctx.abort.aborted) throw e
-        // Otherwise it was our timeout — cancel child and return structured error
+        // If the deadline fired, it's a real timeout — cancel child and return structured error
+        if (deadline.signal.aborted) {
+          cancel()
+          return {
+            title: params.description,
+            metadata: {
+              sessionId: session.id,
+              model,
+            },
+            output: [
+              `TIMEOUT: Task exceeded ${ms / 1000}s deadline and was cancelled.`,
+              `task_id: ${session.id}`,
+              "",
+              "You can resume this task by passing the task_id above.",
+              "If this task is important, retry with a longer timeout or a simpler prompt.",
+              "Recommended: retry up to 5 times before giving up.",
+            ].join("\n"),
+          }
+        }
+        // Non-timeout, non-abort error — surface the actual failure
         cancel()
+        const msg = e instanceof Error ? e.message : String(e)
         return {
           title: params.description,
           metadata: {
@@ -207,12 +227,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
             model,
           },
           output: [
-            `TIMEOUT: Task exceeded ${ms / 1000}s deadline and was cancelled.`,
+            `ERROR: Task failed: ${msg}`,
             `task_id: ${session.id}`,
             "",
-            "You can resume this task by passing the task_id above.",
-            "If this task is important, retry with a longer timeout or a simpler prompt.",
-            "Recommended: retry up to 5 times before giving up.",
+            "You can resume this task by passing the task_id above, or try a different approach.",
           ].join("\n"),
         }
       } finally {
