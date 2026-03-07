@@ -10,6 +10,9 @@ import { iife } from "@/util/iife"
 import { defer } from "@/util/defer"
 import { Config } from "../config/config"
 import { PermissionNext } from "@/permission/next"
+import { abortAfterAny } from "@/util/abort"
+
+const DEFAULT_TIMEOUT = 600_000 // 10 minutes
 
 const parameters = z.object({
   description: z.string().describe("A short (3-5 words) description of the task"),
@@ -22,7 +25,31 @@ const parameters = z.object({
     )
     .optional(),
   command: z.string().describe("The command that triggered this task").optional(),
+  timeout: z
+    .number()
+    .optional()
+    .describe(
+      "Optional timeout in seconds. If the task doesn't complete within this time, it will be cancelled and return an error with the task_id for resumption. Default: 600 (10 minutes). Set higher (900-1800) for complex implementation tasks.",
+    ),
 })
+
+function childText(result: Awaited<ReturnType<typeof SessionPrompt.prompt>>, id: string) {
+  if (result.info.role !== "assistant") return ""
+  const error = result.info.error
+  if (error?.name === "MessageAbortedError") return "Task was cancelled by user."
+  const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
+  if (text) return text
+  if (!error) return ""
+  const msg = error.data && "message" in error.data ? (error.data as { message: string }).message : error.name
+  const code =
+    error.data && "statusCode" in error.data ? ` (status ${(error.data as { statusCode: number }).statusCode})` : ""
+  return [
+    `ERROR: The subagent session (${id}) failed with: ${error.name}${code}`,
+    msg,
+    "",
+    "You can retry this task by passing the task_id above, or try a different approach.",
+  ].join("\n")
+}
 
 export const TaskTool = Tool.define("task", async (ctx) => {
   const agents = await Agent.list().then((x) => x.filter((a) => a.mode !== "primary"))
@@ -125,40 +152,71 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
       const promptParts = await SessionPrompt.resolvePromptParts(params.prompt)
 
-      const result = await SessionPrompt.prompt({
-        messageID,
-        sessionID: session.id,
-        model: {
-          modelID: model.modelID,
-          providerID: model.providerID,
-        },
-        agent: agent.name,
-        tools: {
-          todowrite: false,
-          todoread: false,
-          ...(hasTaskPermission ? {} : { task: false }),
-          ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((t) => [t, false])),
-        },
-        parts: promptParts,
-      })
+      const ms = params.timeout ? params.timeout * 1000 : (config.experimental?.task_timeout ?? DEFAULT_TIMEOUT)
+      const deadline = abortAfterAny(ms, ctx.abort)
+      deadline.signal.addEventListener("abort", cancel)
 
-      const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
+      try {
+        const result = await SessionPrompt.prompt({
+          messageID,
+          sessionID: session.id,
+          model: {
+            modelID: model.modelID,
+            providerID: model.providerID,
+          },
+          agent: agent.name,
+          tools: {
+            todowrite: false,
+            todoread: false,
+            ...(hasTaskPermission ? {} : { task: false }),
+            ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((t) => [t, false])),
+          },
+          parts: promptParts,
+        })
 
-      const output = [
-        `task_id: ${session.id} (for resuming to continue this task if needed)`,
-        "",
-        "<task_result>",
-        text,
-        "</task_result>",
-      ].join("\n")
+        deadline.clearTimeout()
 
-      return {
-        title: params.description,
-        metadata: {
-          sessionId: session.id,
-          model,
-        },
-        output,
+        const text = childText(result, session.id)
+
+        const output = [
+          `task_id: ${session.id} (for resuming to continue this task if needed)`,
+          "",
+          "<task_result>",
+          text,
+          "</task_result>",
+        ].join("\n")
+
+        return {
+          title: params.description,
+          metadata: {
+            sessionId: session.id,
+            model,
+          },
+          output,
+        }
+      } catch (e) {
+        deadline.clearTimeout()
+        // If parent was aborted (user Ctrl+C), re-throw — don't mask it
+        if (ctx.abort.aborted) throw e
+        // Otherwise it was our timeout — cancel child and return structured error
+        cancel()
+        return {
+          title: params.description,
+          metadata: {
+            sessionId: session.id,
+            model,
+          },
+          output: [
+            `TIMEOUT: Task exceeded ${ms / 1000}s deadline and was cancelled.`,
+            `task_id: ${session.id}`,
+            "",
+            "You can resume this task by passing the task_id above.",
+            "If this task is important, retry with a longer timeout or a simpler prompt.",
+            "Recommended: retry up to 5 times before giving up.",
+          ].join("\n"),
+        }
+      } finally {
+        deadline.signal.removeEventListener("abort", cancel)
       }
     },
   }

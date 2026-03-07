@@ -1166,6 +1166,14 @@ export namespace Config {
             .positive()
             .optional()
             .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
+          task_timeout: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe(
+              "Default timeout in milliseconds for Task tool sub-agent execution (default: 300000 = 5 minutes)",
+            ),
         })
         .optional(),
     })

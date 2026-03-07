@@ -22,6 +22,11 @@ Usage notes:
 4. The agent's outputs should generally be trusted
 5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent. Tell it how to verify its work if possible (e.g., relevant test commands).
 6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+7. Each task has a timeout (default: 10 minutes). If a task times out, it returns an error with the task_id. You should retry timed-out tasks by passing the task_id to resume the session. Retry up to 5 times before reporting failure to the user. You MUST set an appropriate timeout for the task complexity:
+   - Quick lookups, file reads, simple searches: omit timeout (use default)
+   - Implementation tasks, code changes, multi-file edits: set timeout to 900 (15 min)
+   - Complex multi-step tasks (architect, judge, spec-implementor): set timeout to 1200-1800 (20-30 min)
+   - Always err on the side of a longer timeout rather than letting a task get killed mid-work
 
 Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
 
