@@ -79,38 +79,68 @@ function cleanupOrphanedParts() {
 }
 
 /**
- * Periodic scan for tool parts stuck in "running" beyond MAX_RUNNING.
- * Safety net for cases where the bash hard-stop or abort signal also fails.
+ * Single watchdog tick: find tool parts stuck in "running" beyond the cutoff,
+ * filter to leaf-level tools, cancel their sessions, and force-error the
+ * DB rows as a safety net.
+ *
+ * Only cancels "leaf" stuck tools — i.e. non-task tools that are the actual
+ * root cause.  Task tools that are waiting on a child session with its own
+ * stuck tool are left alone so the normal error-propagation path can run:
+ * child cancel → task tool resolves → parent LLM processes the error.
+ *
+ * Exported for testing.
  */
-function watchdog() {
-  const timer = setInterval(() => {
-    const cutoff = Date.now() - MAX_RUNNING
-    Database.use((db) => {
-      const stuck = db
-        .select({ id: PartTable.id, session_id: PartTable.session_id })
-        .from(PartTable)
-        .where(
-          sql`json_extract(${PartTable.data}, '$.type') = 'tool'
-              AND json_extract(${PartTable.data}, '$.state.status') = 'running'
-              AND json_extract(${PartTable.data}, '$.state.time.start') < ${cutoff}`,
-        )
-        .all()
-      if (stuck.length === 0) return
-      log.warn("watchdog: force-erroring stuck tool parts", {
-        count: stuck.length,
-        ids: stuck.map((r) => r.id),
+export function watchdogTick(cutoff: number) {
+  Database.use((db) => {
+    const stuck = db
+      .select({
+        id: PartTable.id,
+        session_id: PartTable.session_id,
+        tool: sql<string>`json_extract(${PartTable.data}, '$.tool')`,
+        child: sql<string | null>`json_extract(${PartTable.data}, '$.state.metadata.sessionId')`,
       })
+      .from(PartTable)
+      .where(
+        sql`json_extract(${PartTable.data}, '$.type') = 'tool'
+            AND json_extract(${PartTable.data}, '$.state.status') = 'running'
+            AND json_extract(${PartTable.data}, '$.state.time.start') < ${cutoff}`,
+      )
+      .all()
+    if (stuck.length === 0) return
 
-      // Cancel the owning sessions so the processor's abort signal fires
-      // and the in-memory stream loop unblocks
-      const sessions = [...new Set(stuck.map((r) => r.session_id))]
-      for (const id of sessions) {
-        log.warn("watchdog: cancelling stuck session", { sessionID: id })
-        SessionPrompt.cancel(id)
-      }
+    // Sessions that contain at least one stuck tool
+    const stuckSessions = new Set(stuck.map((r) => r.session_id))
 
-      // DB update as redundant safety net (cancel may already write status)
-      const now = Date.now()
+    // A task tool whose child session also has stuck tools is just
+    // waiting — it will resolve once the child is cancelled.
+    // Everything else (non-task tools, or task tools whose child has
+    // no stuck tools) is a leaf that we must force-error.
+    const leaf = stuck.filter((r) => {
+      if (r.tool !== "task") return true
+      if (!r.child) return true
+      return !stuckSessions.has(r.child)
+    })
+
+    log.warn("watchdog: found stuck tool parts", {
+      total: stuck.length,
+      leaf: leaf.length,
+      ids: stuck.map((r) => r.id),
+    })
+
+    if (leaf.length === 0) return
+
+    // Cancel only the sessions that own leaf-level stuck tools.
+    // Parent sessions with waiting task tools keep running so
+    // their LLM can process the child error normally.
+    const sessions = [...new Set(leaf.map((r) => r.session_id))]
+    for (const id of sessions) {
+      log.warn("watchdog: cancelling stuck session", { sessionID: id })
+      SessionPrompt.cancel(id)
+    }
+
+    // DB update as redundant safety net — only for leaf tools
+    const now = Date.now()
+    for (const r of leaf) {
       db.update(PartTable)
         .set({
           data: sql`json_set(
@@ -122,12 +152,21 @@ function watchdog() {
           )`,
         })
         .where(
-          sql`json_extract(${PartTable.data}, '$.type') = 'tool'
-              AND json_extract(${PartTable.data}, '$.state.status') = 'running'
-              AND json_extract(${PartTable.data}, '$.state.time.start') < ${cutoff}`,
+          sql`${PartTable.id} = ${r.id}
+              AND json_extract(${PartTable.data}, '$.state.status') = 'running'`,
         )
         .run()
-    })
+    }
+  })
+}
+
+/**
+ * Periodic scan for tool parts stuck in "running" beyond MAX_RUNNING.
+ * Safety net for cases where the bash hard-stop or abort signal also fails.
+ */
+function watchdog() {
+  const timer = setInterval(() => {
+    watchdogTick(Date.now() - MAX_RUNNING)
   }, WATCHDOG_INTERVAL)
   timer.unref()
 }

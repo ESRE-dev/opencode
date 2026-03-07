@@ -210,28 +210,18 @@ export const BashTool = Tool.define("bash", async () => {
 
       const kill = () => Shell.killTree(proc, { exited: () => exited })
 
-      if (ctx.abort.aborted) {
-        aborted = true
-        await kill()
-      }
-
-      const abortHandler = () => {
-        aborted = true
-        void kill()
-      }
-
-      ctx.abort.addEventListener("abort", abortHandler, { once: true })
-
       const timeoutTimer = setTimeout(() => {
         timedOut = true
         void kill()
       }, timeout + 100)
 
       await new Promise<void>((resolve, reject) => {
+        const KILL_GRACE = 5_000
+        let abortGrace: ReturnType<typeof setTimeout> | undefined
+
         // Hard-stop fallback: if neither exit nor error fires after
         // timeout + kill grace period, force-resolve to prevent hanging
         // forever when the process handle is lost (e.g., after restart).
-        const KILL_GRACE = 5_000
         const hardStop = setTimeout(
           () => {
             if (!exited) {
@@ -251,8 +241,33 @@ export const BashTool = Tool.define("bash", async () => {
         const cleanup = () => {
           clearTimeout(timeoutTimer)
           clearTimeout(hardStop)
-          ctx.abort.removeEventListener("abort", abortHandler)
+          if (abortGrace) clearTimeout(abortGrace)
+          ctx.abort.removeEventListener("abort", onAbort)
         }
+
+        // When abort fires, kill the process and give it a short grace
+        // period to emit exit/error.  If it doesn't, force-resolve so
+        // we never hang forever on a dead process handle.
+        const onAbort = () => {
+          aborted = true
+          void kill()
+          abortGrace = setTimeout(() => {
+            if (!exited) {
+              exited = true
+              log.warn("bash abort-grace: force-resolving after abort+kill", {
+                pid: proc.pid,
+                command: params.command.slice(0, 80),
+              })
+              cleanup()
+              resolve()
+            }
+          }, KILL_GRACE)
+        }
+
+        ctx.abort.addEventListener("abort", onAbort, { once: true })
+
+        // If already aborted before we registered, fire immediately
+        if (ctx.abort.aborted) onAbort()
 
         proc.once("exit", () => {
           exited = true

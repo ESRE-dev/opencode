@@ -174,8 +174,8 @@ export namespace SessionPrompt {
       })
     }
     if (permissions.length > 0) {
-      session.permission = permissions
-      await Session.setPermission({ sessionID: session.id, permission: permissions })
+      session.permission = PermissionNext.merge(session.permission ?? [], permissions)
+      await Session.setPermission({ sessionID: session.id, permission: session.permission })
     }
 
     if (input.noReply === true) {

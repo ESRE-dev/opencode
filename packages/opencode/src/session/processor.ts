@@ -21,6 +21,33 @@ export namespace SessionProcessor {
   const MAX_RETRIES = 12
   const log = Log.create({ service: "session.processor" })
 
+  /** Recursively mark running tool parts as "error" for a child session and its descendants. */
+  async function abortChildren(sessionID: string) {
+    const msgs = await Session.messages({ sessionID })
+    for (const msg of msgs) {
+      for (const part of msg.parts) {
+        if (part.type !== "tool") continue
+        if (part.state.status === "completed" || part.state.status === "error") continue
+        // If this is a task tool with a child session, recurse first
+        if (part.tool === "task" && part.state.status === "running" && part.state.metadata?.sessionId) {
+          await abortChildren(part.state.metadata.sessionId)
+        }
+        await Session.updatePart({
+          ...part,
+          state: {
+            ...part.state,
+            status: "error",
+            error: "Tool execution aborted",
+            time: {
+              start: part.state.status === "running" ? part.state.time.start : Date.now(),
+              end: Date.now(),
+            },
+          },
+        })
+      }
+    }
+  }
+
   export type Info = Awaited<ReturnType<typeof create>>
   export type Result = Awaited<ReturnType<Info["process"]>>
 
@@ -410,23 +437,15 @@ export namespace SessionProcessor {
               SessionStatus.set(input.sessionID, { type: "idle" })
             }
           }
-          if (snapshot) {
-            const patch = await Snapshot.patch(snapshot)
-            if (patch.files.length) {
-              await Session.updatePart({
-                id: Identifier.ascending("part"),
-                messageID: input.assistantMessage.id,
-                sessionID: input.sessionID,
-                type: "patch",
-                hash: patch.hash,
-                files: patch.files,
-              })
-            }
-            snapshot = undefined
-          }
-          const p = await MessageV2.parts(input.assistantMessage.id)
-          for (const part of p) {
+          // Cleanup sweep FIRST — mark any stuck tool parts as "error" before
+          // the (potentially slow) snapshot patch.  This ensures parent sessions
+          // see child tool parts in a terminal state promptly after abort.
+          const sweep = await MessageV2.parts(input.assistantMessage.id)
+          for (const part of sweep) {
             if (part.type === "tool" && part.state.status !== "completed" && part.state.status !== "error") {
+              if (part.tool === "task" && part.state.status === "running" && part.state.metadata?.sessionId) {
+                await abortChildren(part.state.metadata.sessionId)
+              }
               await Session.updatePart({
                 ...part,
                 state: {
@@ -434,12 +453,30 @@ export namespace SessionProcessor {
                   status: "error",
                   error: "Tool execution aborted",
                   time: {
-                    start: Date.now(),
+                    start: part.state.status === "running" ? part.state.time.start : Date.now(),
                     end: Date.now(),
                   },
                 },
               })
             }
+          }
+          if (snapshot) {
+            try {
+              const patch = await Snapshot.patch(snapshot)
+              if (patch.files.length) {
+                await Session.updatePart({
+                  id: Identifier.ascending("part"),
+                  messageID: input.assistantMessage.id,
+                  sessionID: input.sessionID,
+                  type: "patch",
+                  hash: patch.hash,
+                  files: patch.files,
+                })
+              }
+            } catch (e) {
+              log.warn("snapshot patch failed during cleanup", { error: e, sessionID: input.sessionID })
+            }
+            snapshot = undefined
           }
           input.assistantMessage.time.completed = Date.now()
           await Session.updateMessage(input.assistantMessage)
