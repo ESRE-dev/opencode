@@ -18,6 +18,7 @@ import { Question } from "@/question"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
+  const MAX_RETRIES = 12
   const log = Log.create({ service: "session.processor" })
 
   export type Info = Awaited<ReturnType<typeof create>>
@@ -52,7 +53,18 @@ export namespace SessionProcessor {
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
             const stream = await LLM.stream(streamInput)
 
-            for await (const value of stream.fullStream) {
+            // Race each stream chunk against the abort signal so we don't
+            // hang waiting for outstanding tool results after cancellation.
+            const aborted = new Promise<never>((_, reject) => {
+              if (input.abort.aborted) return reject(new DOMException("Aborted", "AbortError"))
+              input.abort.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+                once: true,
+              })
+            })
+            const iter = stream.fullStream[Symbol.asyncIterator]()
+            while (true) {
+              const { done, value } = await Promise.race([iter.next(), aborted])
+              if (done) break
               input.abort.throwIfAborted()
               switch (value.type) {
                 case "start":
@@ -162,7 +174,7 @@ export namespace SessionProcessor {
                       )
                     ) {
                       const agent = await Agent.get(input.assistantMessage.agent)
-                      await PermissionNext.ask({
+                      const permission = PermissionNext.ask({
                         permission: "doom_loop",
                         patterns: [value.toolName],
                         sessionID: input.assistantMessage.sessionID,
@@ -173,6 +185,12 @@ export namespace SessionProcessor {
                         always: [value.toolName],
                         ruleset: agent.permission,
                       })
+                      const aborted = new Promise<never>((_, reject) => {
+                        input.abort.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+                          once: true,
+                        })
+                      })
+                      await Promise.race([permission, aborted])
                     }
                   }
                   break
@@ -364,7 +382,7 @@ export namespace SessionProcessor {
               })
             } else {
               const retry = SessionRetry.retryable(error)
-              if (retry !== undefined) {
+              if (retry !== undefined && attempt < MAX_RETRIES) {
                 attempt++
                 const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
                 SessionStatus.set(input.sessionID, {
@@ -376,7 +394,15 @@ export namespace SessionProcessor {
                 await SessionRetry.sleep(delay, input.abort).catch(() => {})
                 continue
               }
-              input.assistantMessage.error = error
+              if (retry !== undefined && attempt >= MAX_RETRIES) {
+                log.error("max retries exceeded", { attempt, sessionID: input.sessionID })
+                input.assistantMessage.error = MessageV2.fromError(
+                  new Error(`Max retries (${MAX_RETRIES}) exceeded: ${retry}`),
+                  { providerID: input.model.providerID },
+                )
+              } else {
+                input.assistantMessage.error = error
+              }
               Bus.publish(Session.Event.Error, {
                 sessionID: input.assistantMessage.sessionID,
                 error: input.assistantMessage.error,
