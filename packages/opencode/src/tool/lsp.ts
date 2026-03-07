@@ -7,6 +7,9 @@ import { Instance } from "../project/instance"
 import { pathToFileURL } from "url"
 import { assertExternalDirectory } from "./external-directory"
 import { Filesystem } from "../util/filesystem"
+import { abortAfterAny, raceSignal } from "../util/abort"
+
+const LSP_TIMEOUT = 10_000
 
 const operations = [
   "goToDefinition",
@@ -60,28 +63,38 @@ export const LspTool = Tool.define("lsp", {
 
     await LSP.touchFile(file, true)
 
-    const result: unknown[] = await (async () => {
-      switch (args.operation) {
-        case "goToDefinition":
-          return LSP.definition(position)
-        case "findReferences":
-          return LSP.references(position)
-        case "hover":
-          return LSP.hover(position)
-        case "documentSymbol":
-          return LSP.documentSymbol(uri)
-        case "workspaceSymbol":
-          return LSP.workspaceSymbol("")
-        case "goToImplementation":
-          return LSP.implementation(position)
-        case "prepareCallHierarchy":
-          return LSP.prepareCallHierarchy(position)
-        case "incomingCalls":
-          return LSP.incomingCalls(position)
-        case "outgoingCalls":
-          return LSP.outgoingCalls(position)
-      }
-    })()
+    const deadline = abortAfterAny(LSP_TIMEOUT, ctx.abort)
+    let result: unknown[]
+    try {
+      result = await raceSignal(
+        (async () => {
+          switch (args.operation) {
+            case "goToDefinition":
+              return LSP.definition(position)
+            case "findReferences":
+              return LSP.references(position)
+            case "hover":
+              return LSP.hover(position)
+            case "documentSymbol":
+              return LSP.documentSymbol(uri)
+            case "workspaceSymbol":
+              return LSP.workspaceSymbol("")
+            case "goToImplementation":
+              return LSP.implementation(position)
+            case "prepareCallHierarchy":
+              return LSP.prepareCallHierarchy(position)
+            case "incomingCalls":
+              return LSP.incomingCalls(position)
+            case "outgoingCalls":
+              return LSP.outgoingCalls(position)
+          }
+        })(),
+        deadline.signal,
+        `LSP ${args.operation} timed out after ${LSP_TIMEOUT / 1000}s`,
+      )
+    } finally {
+      deadline.clearTimeout()
+    }
 
     const output = (() => {
       if (result.length === 0) return `No results found for ${args.operation}`
