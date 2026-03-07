@@ -14,6 +14,7 @@ import { Snapshot } from "../snapshot"
 import { Truncate } from "../tool/truncation"
 import { Database, sql } from "../storage/db"
 import { PartTable } from "../session/session.sql"
+import { SessionPrompt } from "../session/prompt"
 
 const log = Log.create({ service: "bootstrap" })
 
@@ -86,7 +87,7 @@ function watchdog() {
     const cutoff = Date.now() - MAX_RUNNING
     Database.use((db) => {
       const stuck = db
-        .select({ id: PartTable.id })
+        .select({ id: PartTable.id, session_id: PartTable.session_id })
         .from(PartTable)
         .where(
           sql`json_extract(${PartTable.data}, '$.type') = 'tool'
@@ -99,6 +100,16 @@ function watchdog() {
         count: stuck.length,
         ids: stuck.map((r) => r.id),
       })
+
+      // Cancel the owning sessions so the processor's abort signal fires
+      // and the in-memory stream loop unblocks
+      const sessions = [...new Set(stuck.map((r) => r.session_id))]
+      for (const id of sessions) {
+        log.warn("watchdog: cancelling stuck session", { sessionID: id })
+        SessionPrompt.cancel(id)
+      }
+
+      // DB update as redundant safety net (cancel may already write status)
       const now = Date.now()
       db.update(PartTable)
         .set({
