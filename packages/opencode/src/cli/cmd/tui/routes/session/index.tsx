@@ -338,9 +338,22 @@ export function Session() {
 
   function moveFirstChild() {
     const all = subagents()
-    const next = all[0]
-    if (!next) return
-    navigate({ type: "session", sessionID: next.id })
+    if (all[0]) {
+      navigate({ type: "session", sessionID: all[0].id })
+      return
+    }
+    // Fallback: find child session from task tool parts in messages
+    for (const msg of messages()) {
+      for (const part of sync.data.part[msg.id] ?? []) {
+        if (part.type !== "tool" || part.tool !== "task") continue
+        if (part.state.status === "pending") continue
+        const id = (part.state.metadata as Record<string, any>)?.sessionId
+        if (id) {
+          navigate({ type: "session", sessionID: id })
+          return
+        }
+      }
+    }
   }
 
   function moveChild(direction: number) {
