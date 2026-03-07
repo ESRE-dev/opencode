@@ -128,14 +128,35 @@ export function Session() {
       .filter((x) => x.parentID === parentID || x.id === parentID)
       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
+  const descendants = createMemo(() => {
+    const root = session()?.parentID ?? session()?.id
+    if (!root) return []
+    const all = sync.data.session
+    const result: typeof all = []
+    const queue = [root]
+    while (queue.length) {
+      const id = queue.shift()!
+      const match = all.find((x) => x.id === id)
+      if (match) result.push(match)
+      for (const child of all) {
+        if (child.parentID === id) queue.push(child.id)
+      }
+    }
+    return result
+  })
+  const subagents = createMemo(() => {
+    return sync.data.session
+      .filter((x) => x.parentID === route.sessionID)
+      .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
   const permissions = createMemo(() => {
     if (session()?.parentID) return []
-    return children().flatMap((x) => sync.data.permission[x.id] ?? [])
+    return descendants().flatMap((x) => sync.data.permission[x.id] ?? [])
   })
   const questions = createMemo(() => {
     if (session()?.parentID) return []
-    return children().flatMap((x) => sync.data.question[x.id] ?? [])
+    return descendants().flatMap((x) => sync.data.question[x.id] ?? [])
   })
 
   const pending = createMemo(() => {
@@ -316,20 +337,21 @@ export function Session() {
   const local = useLocal()
 
   function moveFirstChild() {
-    if (children().length === 1) return
-    const next = children().find((x) => !!x.parentID)
-    if (next) {
-      navigate({
-        type: "session",
-        sessionID: next.id,
-      })
-    }
+    const all = subagents()
+    console.log("moveFirstChild", {
+      routeSessionID: route.sessionID,
+      subagentCount: all.length,
+      subagentIDs: all.map((x) => x.id),
+      sessionParentID: session()?.parentID,
+    })
+    const next = all[0]
+    if (!next) return
+    navigate({ type: "session", sessionID: next.id })
   }
 
   function moveChild(direction: number) {
-    if (children().length === 1) return
-
     const sessions = children().filter((x) => !!x.parentID)
+    if (sessions.length === 0) return
     let next = sessions.findIndex((x) => x.id === session()?.id) + direction
 
     if (next >= sessions.length) next = 0
@@ -914,6 +936,7 @@ export function Session() {
       category: "Session",
       hidden: true,
       onSelect: (dialog) => {
+        console.log("session_child_first triggered")
         moveFirstChild()
         dialog.clear()
       },
@@ -1171,6 +1194,7 @@ export function Session() {
                   toBottom()
                 }}
                 sessionID={route.sessionID}
+                parentSessionID={session()?.parentID}
               />
             </box>
           </Show>
@@ -1953,10 +1977,7 @@ function WebSearch(props: ToolProps<any>) {
 }
 
 function Task(props: ToolProps<typeof TaskTool>) {
-  const { theme } = useTheme()
-  const keybind = useKeybind()
   const { navigate } = useRoute()
-  const local = useLocal()
   const sync = useSync()
 
   onMount(() => {
@@ -2009,11 +2030,15 @@ function Task(props: ToolProps<typeof TaskTool>) {
       complete={props.input.description}
       pending="Delegating..."
       part={props.part}
-      onClick={() => {
-        if (props.metadata.sessionId) {
-          navigate({ type: "session", sessionID: props.metadata.sessionId })
-        }
-      }}
+      onClick={
+        props.metadata.sessionId
+          ? () => {
+              const id = props.metadata.sessionId
+              if (!id) return
+              navigate({ type: "session", sessionID: id })
+            }
+          : undefined
+      }
     >
       {content()}
     </InlineTool>

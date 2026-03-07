@@ -60,9 +60,17 @@ function init() {
   useKeyboard((evt) => {
     if (suspended()) return
     if (dialog.stack.length > 0) return
+    const parsed = keybind.parse(evt)
+    console.log("dialog-command keyboard", {
+      name: evt.name,
+      ctrl: evt.ctrl,
+      leader: keybind.leader,
+      parsed: JSON.stringify(parsed),
+    })
     for (const option of entries()) {
       if (!isEnabled(option)) continue
       if (option.keybind && keybind.match(option.keybind, evt)) {
+        console.log("dialog-command matched", option.value)
         evt.preventDefault()
         option.onSelect?.(dialog)
         return
