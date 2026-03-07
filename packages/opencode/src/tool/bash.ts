@@ -228,8 +228,29 @@ export const BashTool = Tool.define("bash", async () => {
       }, timeout + 100)
 
       await new Promise<void>((resolve, reject) => {
+        // Hard-stop fallback: if neither exit nor error fires after
+        // timeout + kill grace period, force-resolve to prevent hanging
+        // forever when the process handle is lost (e.g., after restart).
+        const KILL_GRACE = 5_000
+        const hardStop = setTimeout(
+          () => {
+            if (!exited) {
+              exited = true
+              timedOut = true
+              log.warn("bash hard-stop: process never emitted exit/error", {
+                pid: proc.pid,
+                command: params.command.slice(0, 80),
+              })
+              cleanup()
+              resolve()
+            }
+          },
+          timeout + 100 + KILL_GRACE,
+        )
+
         const cleanup = () => {
           clearTimeout(timeoutTimer)
+          clearTimeout(hardStop)
           ctx.abort.removeEventListener("abort", abortHandler)
         }
 
