@@ -338,12 +338,6 @@ export function Session() {
 
   function moveFirstChild() {
     const all = subagents()
-    console.log("moveFirstChild", {
-      routeSessionID: route.sessionID,
-      subagentCount: all.length,
-      subagentIDs: all.map((x) => x.id),
-      sessionParentID: session()?.parentID,
-    })
     const next = all[0]
     if (!next) return
     navigate({ type: "session", sessionID: next.id })
@@ -936,7 +930,6 @@ export function Session() {
       category: "Session",
       hidden: true,
       onSelect: (dialog) => {
-        console.log("session_child_first triggered")
         moveFirstChild()
         dialog.clear()
       },
