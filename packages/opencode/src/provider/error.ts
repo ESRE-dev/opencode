@@ -29,6 +29,13 @@ export namespace ProviderError {
     return status === 404 || e.isRetryable
   }
 
+  // Copilot gateway returns bare text 400s for transient issues.
+  // These are gateway-level rejections, not model errors, and should be retried.
+  function isCopilotErrorRetryable(e: APICallError) {
+    if (e.statusCode === 400 && e.responseBody && !json(e.responseBody)) return true
+    return e.isRetryable ?? false
+  }
+
   // Providers not reliably handled in this function:
   // - z.ai: can accept overflow silently (needs token-count/context-window checks)
   function isOverflow(message: string) {
@@ -87,6 +94,13 @@ export namespace ProviderError {
           return "Forbidden: request was blocked by a gateway or proxy. You may not have permission to access this resource — check your account and provider settings."
         }
         return msg
+      }
+
+      // Avoid tautological "X: X" when response body is just the status text
+      const text = e.responseBody.trim()
+      if (e.statusCode && text.toLowerCase() === (STATUS_CODES[e.statusCode] ?? "").toLowerCase()) {
+        const provider = providerID.split("/")[0] ?? providerID
+        return `${provider} rejected the request (HTTP ${e.statusCode}). This may indicate context overflow, an unsupported request, or a gateway-level rejection.`
       }
 
       return `${msg}: ${e.responseBody}`
@@ -186,6 +200,24 @@ export namespace ProviderError {
       }
     }
 
+    // Copilot gateway returns bare HTTP 400 "Bad Request" (text/plain) when
+    // context exceeds limits. No structured error body is provided.
+    // Known overlap: upstream #14488 (empty tool descriptions) also triggers
+    // bare 400s — compaction is still preferable to terminal failure.
+    if (
+      input.providerID.includes("github-copilot") &&
+      input.error.statusCode === 400 &&
+      input.error.responseBody &&
+      !json(input.error.responseBody) &&
+      input.error.responseBody.trim().length < 100
+    ) {
+      return {
+        type: "context_overflow",
+        message: "GitHub Copilot gateway returned a bare 400, treating as context overflow",
+        responseBody: input.error.responseBody,
+      }
+    }
+
     const metadata = input.error.url ? { url: input.error.url } : undefined
     return {
       type: "api_error",
@@ -193,7 +225,9 @@ export namespace ProviderError {
       statusCode: input.error.statusCode,
       isRetryable: input.providerID.startsWith("openai")
         ? isOpenAiErrorRetryable(input.error)
-        : input.error.isRetryable,
+        : input.providerID.includes("github-copilot")
+          ? isCopilotErrorRetryable(input.error)
+          : input.error.isRetryable,
       responseHeaders: input.error.responseHeaders,
       responseBody: input.error.responseBody,
       metadata,

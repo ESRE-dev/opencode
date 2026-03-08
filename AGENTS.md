@@ -124,52 +124,33 @@ const table = sqliteTable("session", {
 - Tests cannot run from repo root (guard: `do-not-run-tests-from-root`); run from package dirs like `packages/opencode`.
 
 <!-- BEGIN BEADS INTEGRATION -->
+
 ## Issue Tracking with bd (beads)
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
 
 ### Why bd?
 
-- Dependency-aware: Track blockers and relationships between issues
+- Dependency-aware: blocking deps, parent-child hierarchy, provenance links
 - Git-friendly: Dolt-powered version control with native sync
-- Agent-optimized: JSON output, ready work detection, discovered-from links
+- Agent-optimized: JSON output, ready work detection, swarm coordination
 - Prevents duplicate tracking systems and confusion
-
-### Quick Start
-
-**Check for ready work:**
-
-```bash
-bd ready --json
-```
-
-**Create new issues:**
-
-```bash
-bd create "Issue title" --description="Detailed context" -t bug|feature|task -p 0-4 --json
-bd create "Issue title" --description="What this issue is about" -p 1 --deps discovered-from:bd-123 --json
-```
-
-**Claim and update:**
-
-```bash
-bd update <id> --claim --json
-bd update bd-42 --priority 1 --json
-```
-
-**Complete work:**
-
-```bash
-bd close bd-42 --reason "Completed" --json
-```
 
 ### Issue Types
 
 - `bug` - Something broken
 - `feature` - New functionality
 - `task` - Work item (tests, docs, refactoring)
-- `epic` - Large feature with subtasks
+- `epic` - A goal/theme decomposed into child issues (NOT a single task)
 - `chore` - Maintenance (dependencies, tooling)
+
+### Issue Statuses
+
+- `open` - Not started
+- `in_progress` - Actively being worked on
+- `blocked` - Waiting on a dependency
+- `deferred` - Postponed
+- `closed` - Done
 
 ### Priorities
 
@@ -179,14 +160,157 @@ bd close bd-42 --reason "Completed" --json
 - `3` - Low (polish, optimization)
 - `4` - Backlog (future ideas)
 
+### Creating Issues
+
+```bash
+# Simple issue
+bd create "Fix the bug" --description="Details" -t bug -p 1 --json
+
+# Issue with labels
+bd create "Add feature" -d "Details" -t feature -p 2 -l "permissions,subagent" --json
+
+# Issue discovered while working on another issue (provenance link)
+bd create "Found a related bug" -d "Details" -p 1 --deps discovered-from:<source-id> --json
+```
+
+### Epics and Child Issues
+
+An epic is a large body of work decomposed into child issues. Children are linked via the `parent-child` dependency type.
+
+```bash
+# Create an epic
+bd create "Auth system overhaul" -t epic -p 1 --json
+
+# Create children under the epic (auto-numbered: epic-id.1, epic-id.2, ...)
+bd create "Design login UI" -t task -p 1 --parent <epic-id> --json
+bd create "Backend validation" -t bug -p 0 --parent <epic-id> --json
+bd create "Integration tests" -t task -p 2 --parent <epic-id> --json
+
+# Add existing issue as child of epic retroactively
+bd dep add <issue-id> <epic-id> --type parent-child
+
+# List children of an epic
+bd children <epic-id> --json
+
+# Check epic completion (all epics)
+bd epic status --json
+
+# Auto-close epics where all children are done
+bd epic close-eligible
+```
+
+**Key rules for epics:**
+
+- Children are parallel by default; add `blocks` deps between them for ordering
+- `bd ready` respects parent-child blocking: children of a blocked epic don't surface
+- `discovered-from` is NOT epic membership; use `--parent` or `parent-child` dep
+
+### Dependencies
+
+bd has 10 dependency types. Use the right one for the relationship.
+
+**Blocking types** (affect `bd ready` — blocked issues won't appear as ready):
+
+| Type           | Meaning                                 | Example                            |
+| -------------- | --------------------------------------- | ---------------------------------- |
+| `blocks`       | B cannot start until A closes           | `bd dep add B A` (default)         |
+| `parent-child` | Children blocked when parent is blocked | `bd create ... --parent <epic-id>` |
+| `until`        | B waits for a time/condition on A       | Deferred work                      |
+
+**Non-blocking types** (graph annotations, do NOT affect `bd ready`):
+
+| Type              | Meaning                            |
+| ----------------- | ---------------------------------- |
+| `discovered-from` | Found during work on another issue |
+| `caused-by`       | Root cause link                    |
+| `related`         | Informational link                 |
+| `tracks`          | Tracks progress of another issue   |
+| `validates`       | Test/verification link             |
+| `supersedes`      | Replaces another issue             |
+| `relates-to`      | Bidirectional relation             |
+
+```bash
+# Add a blocking dependency (A blocks B)
+bd dep add <blocked-id> <blocker-id>
+bd dep add <blocked-id> <blocker-id> --type blocks  # same thing, explicit
+
+# Add a non-blocking link
+bd dep add <issue-id> <source-id> --type discovered-from
+bd dep add <issue-id> <cause-id> --type caused-by
+
+# List dependencies of an issue
+bd dep list <issue-id> --json
+bd dep list <issue-id> --direction=up --json  # what depends on this issue
+
+# View dependency tree
+bd dep tree <issue-id>
+bd dep tree <epic-id> --direction=up  # show what the epic blocks
+
+# Detect cycles
+bd dep cycles
+```
+
+### Swarm (Parallel Work on Epics)
+
+`bd swarm` coordinates parallel agent work on an epic's child DAG.
+
+```bash
+# Validate epic structure before swarming
+bd swarm validate <epic-id> --json
+
+# Create a swarm from an epic
+bd swarm create <epic-id> --json
+
+# Check swarm status (completed/active/ready/blocked children)
+bd swarm status <epic-id> --json
+
+# List all swarms
+bd swarm list --json
+```
+
+### Reading Issues
+
+```bash
+# Show issue details
+bd show <issue-id> --json
+
+# List all open issues
+bd list --json
+
+# Check for ready (unblocked) work
+bd ready --json
+
+# Search issues by text
+bd search "permission" --json
+```
+
+### Updating and Closing
+
+```bash
+# Claim an issue (assigns to you)
+bd update <id> --claim --json
+
+# Update priority
+bd update <id> --priority 1 --json
+
+# Close an issue
+bd close <id> --reason "Completed" --json
+
+# Reopen
+bd reopen <id> --json
+```
+
 ### Workflow for AI Agents
 
-1. **Check ready work**: `bd ready` shows unblocked issues
-2. **Claim your task atomically**: `bd update <id> --claim`
+1. **Check ready work**: `bd ready --json` shows unblocked issues
+2. **Claim your task**: `bd update <id> --claim --json`
 3. **Work on it**: Implement, test, document
-4. **Discover new work?** Create linked issue:
-   - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
-5. **Complete**: `bd close <id> --reason "Done"`
+4. **Discover new work?** Create linked child or provenance issue:
+   - Child of current epic: `bd create "Sub-task" -d "..." -p 1 --parent <epic-id> --json`
+   - Found during work: `bd create "Found bug" -d "..." -p 1 --deps discovered-from:<source-id> --json`
+5. **Add blocking deps** if one issue must finish before another: `bd dep add <blocked> <blocker>`
+6. **Complete**: `bd close <id> --reason "Done" --json`
+7. **Check epic status**: `bd epic status --json`
 
 ### Auto-Sync
 
@@ -194,19 +318,21 @@ bd automatically syncs via Dolt:
 
 - Each write auto-commits to Dolt history
 - Use `bd dolt push`/`bd dolt pull` for remote sync
-- No manual export/import needed!
+- Use `bd sync` to sync both directions
 
 ### Important Rules
 
-- ✅ Use bd for ALL task tracking
-- ✅ Always use `--json` flag for programmatic use
-- ✅ Link discovered work with `discovered-from` dependencies
-- ✅ Check `bd ready` before asking "what should I work on?"
-- ❌ Do NOT create markdown TODO lists
-- ❌ Do NOT use external issue trackers
-- ❌ Do NOT duplicate tracking systems
+- Use bd for ALL task tracking
+- Always use `--json` flag for programmatic/agent use
+- Use `--parent` to group issues under epics (creates `parent-child` dep)
+- Use `discovered-from` only for provenance, NOT for epic membership
+- Use `blocks` deps to order work within an epic
+- Check `bd ready --json` before asking "what should I work on?"
+- Do NOT create markdown TODO lists for project tracking
+- Do NOT use external issue trackers
+- Do NOT duplicate tracking systems
 
-For more details, see README.md and docs/QUICKSTART.md.
+<!-- END BEADS INTEGRATION -->
 
 ## Landing the Plane (Session Completion)
 
@@ -229,6 +355,7 @@ For more details, see README.md and docs/QUICKSTART.md.
 7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
+
 - Work is NOT complete until `git push` succeeds
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push

@@ -11,6 +11,7 @@ import { defer } from "@/util/defer"
 import { Config } from "../config/config"
 import { PermissionNext } from "@/permission/next"
 import { abortAfterAny } from "@/util/abort"
+import { MCP } from "../mcp"
 
 const DEFAULT_TIMEOUT = 600_000 // 10 minutes
 
@@ -33,19 +34,53 @@ const parameters = z.object({
     ),
 })
 
-function childText(result: Awaited<ReturnType<typeof SessionPrompt.prompt>>, id: string) {
+async function childText(result: Awaited<ReturnType<typeof SessionPrompt.prompt>>, id: string) {
   if (result.info.role !== "assistant") return ""
   const error = result.info.error
   if (error?.name === "MessageAbortedError") return "Task was cancelled by user."
   const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
   if (text) return text
   if (!error) return ""
+
+  // The child errored with no text output. Recover substantive work from
+  // the session history so the parent doesn't lose everything.
+  const lines: string[] = []
+
+  // 1. Collect completed tool outputs from the errored message itself
+  for (const p of result.parts) {
+    if (p.type !== "tool" || p.state.status !== "completed") continue
+    lines.push(`[${p.state.title}]\n${p.state.output}`)
+  }
+
+  // 2. Walk backwards through earlier messages for the last substantive text
+  if (!lines.length) {
+    const msgs = await Session.messages({ sessionID: id, limit: 10 })
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i]
+      if (m.info.role !== "assistant" || m.info.id === result.info.id) continue
+      const prior = m.parts.findLast((x) => x.type === "text")?.text
+      if (prior) {
+        lines.push(prior)
+        break
+      }
+    }
+  }
+
   const msg = error.data && "message" in error.data ? (error.data as { message: string }).message : error.name
   const code =
     error.data && "statusCode" in error.data ? ` (status ${(error.data as { statusCode: number }).statusCode})` : ""
+  const header = `ERROR: The subagent session (${id}) failed with: ${error.name}${code}\n${msg}`
+
+  if (!lines.length) {
+    return [header, "", "You can retry this task by passing the task_id above, or try a different approach."].join("\n")
+  }
+
   return [
-    `ERROR: The subagent session (${id}) failed with: ${error.name}${code}`,
-    msg,
+    "NOTE: The subagent errored after completing some work. Partial output below:",
+    "",
+    ...lines,
+    "",
+    header,
     "",
     "You can retry this task by passing the task_id above, or try a different approach.",
   ].join("\n")
@@ -89,6 +124,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
 
       const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
+      const mcpKeys = Object.keys(await MCP.tools().catch(() => ({})))
 
       const session = await iife(async () => {
         if (params.task_id) {
@@ -124,6 +160,11 @@ export const TaskTool = Tool.define("task", async (ctx) => {
               action: "allow" as const,
               permission: t,
             })) ?? []),
+            ...mcpKeys.map((t) => ({
+              pattern: "*" as const,
+              action: "allow" as const,
+              permission: t,
+            })),
           ],
         })
       })
@@ -176,7 +217,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
 
         deadline.clearTimeout()
 
-        const text = childText(result, session.id)
+        const text = await childText(result, session.id)
 
         const output = [
           `task_id: ${session.id} (for resuming to continue this task if needed)`,

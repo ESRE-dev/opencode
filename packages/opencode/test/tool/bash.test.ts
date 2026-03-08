@@ -311,6 +311,89 @@ describe("tool.bash permissions", () => {
       },
     })
   })
+
+  test("strips env var prefix from permission pattern", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await BashTool.init()
+        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+        const testCtx = {
+          ...ctx,
+          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+            requests.push(req)
+          },
+        }
+        await bash.execute(
+          {
+            command: "FOO=bar curl http://example.com",
+            description: "Curl with env var",
+          },
+          testCtx,
+        )
+        const bashReq = requests.find((r) => r.permission === "bash")
+        expect(bashReq).toBeDefined()
+        expect(bashReq!.patterns).toContain("curl http://example.com")
+        expect(bashReq!.patterns.some((p) => p.includes("FOO=bar"))).toBe(false)
+      },
+    })
+  })
+
+  test("strips multiple env var prefixes from permission pattern", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await BashTool.init()
+        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+        const testCtx = {
+          ...ctx,
+          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+            requests.push(req)
+          },
+        }
+        await bash.execute(
+          {
+            command: 'A=1 B="two" rm -rf /tmp/test',
+            description: "Rm with env vars",
+          },
+          testCtx,
+        )
+        const bashReq = requests.find((r) => r.permission === "bash")
+        expect(bashReq).toBeDefined()
+        expect(bashReq!.patterns).toContain("rm -rf /tmp/test")
+        expect(bashReq!.patterns.some((p) => p.includes("A=1"))).toBe(false)
+      },
+    })
+  })
+
+  test("always pattern strips env var prefix", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await BashTool.init()
+        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+        const testCtx = {
+          ...ctx,
+          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+            requests.push(req)
+          },
+        }
+        await bash.execute(
+          {
+            command: "FOO=bar ls -la",
+            description: "Ls with env",
+          },
+          testCtx,
+        )
+        const bashReq = requests.find((r) => r.permission === "bash")
+        expect(bashReq).toBeDefined()
+        expect(bashReq!.always[0]).toBe("ls *")
+      },
+    })
+  })
 })
 
 describe("tool.bash truncation", () => {

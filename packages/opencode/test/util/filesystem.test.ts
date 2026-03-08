@@ -320,6 +320,60 @@ describe("filesystem", () => {
     })
   })
 
+  describe("realpath()", () => {
+    test("resolves symlink to real path", async () => {
+      await using tmp = await tmpdir()
+      const real = path.join(tmp.path, "real.txt")
+      const link = path.join(tmp.path, "link.txt")
+      await fs.writeFile(real, "content", "utf-8")
+      await fs.symlink(real, link)
+
+      expect(Filesystem.realpath(link)).toBe(real)
+    })
+
+    test("resolves symlink pointing outside directory", async () => {
+      await using outer = await tmpdir()
+      await using inner = await tmpdir()
+      const target = path.join(outer.path, "secret.txt")
+      await fs.writeFile(target, "secret", "utf-8")
+      const link = path.join(inner.path, "innocent.txt")
+      await fs.symlink(target, link)
+
+      const resolved = Filesystem.realpath(link)
+      expect(resolved).toBe(target)
+      expect(Filesystem.contains(inner.path, resolved)).toBe(false)
+    })
+
+    test("resolves non-existent file via parent directory", async () => {
+      await using tmp = await tmpdir()
+      const nonexistent = path.join(tmp.path, "new.txt")
+
+      const resolved = Filesystem.realpath(nonexistent)
+      expect(resolved).toBe(nonexistent)
+    })
+
+    test("resolves non-existent file under symlinked directory", async () => {
+      await using outer = await tmpdir()
+      await using inner = await tmpdir()
+      const dir = path.join(outer.path, "subdir")
+      await fs.mkdir(dir)
+      const link = path.join(inner.path, "linked-dir")
+      await fs.symlink(dir, link)
+
+      const resolved = Filesystem.realpath(path.join(link, "new.txt"))
+      expect(resolved).toBe(path.join(dir, "new.txt"))
+      expect(Filesystem.contains(inner.path, resolved)).toBe(false)
+    })
+
+    test("returns original path when nothing to resolve", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "regular.txt")
+      await fs.writeFile(filepath, "content", "utf-8")
+
+      expect(Filesystem.realpath(filepath)).toBe(filepath)
+    })
+  })
+
   describe("writeStream()", () => {
     test("writes from Web ReadableStream", async () => {
       await using tmp = await tmpdir()

@@ -1,6 +1,7 @@
 import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
 import { Config } from "@/config/config"
+import { Flag } from "@/flag/flag"
 import { Identifier } from "@/id/id"
 import { Instance } from "@/project/instance"
 import { Database, eq } from "@/storage/db"
@@ -153,6 +154,25 @@ export namespace PermissionNext {
               reject,
             }
             Bus.publish(Event.Asked, info)
+            const timeout = Flag.OPENCODE_PERMISSION_TIMEOUT
+            if (timeout > 0) {
+              setTimeout(() => {
+                if (!s.pending[id]) return
+                delete s.pending[id]
+                log.warn("permission auto-approved after timeout", {
+                  id,
+                  permission: request.permission,
+                  patterns: request.patterns,
+                  timeout,
+                })
+                Bus.publish(Event.Replied, {
+                  sessionID: request.sessionID,
+                  requestID: id,
+                  reply: "once",
+                })
+                resolve()
+              }, timeout)
+            }
           })
         }
         if (rule.action === "allow") continue
@@ -208,9 +228,10 @@ export namespace PermissionNext {
 
         existing.resolve()
 
-        const sessionID = existing.info.sessionID
+        // Cascade: auto-resolve any pending requests across ALL sessions
+        // that now pass under the updated approved rules. s.approved is
+        // project-scoped so child sessions should benefit too.
         for (const [id, pending] of Object.entries(s.pending)) {
-          if (pending.info.sessionID !== sessionID) continue
           const ok = pending.info.patterns.every(
             (pattern) => evaluate(pending.info.permission, pattern, s.approved).action === "allow",
           )
@@ -233,13 +254,33 @@ export namespace PermissionNext {
     },
   )
 
+  // Score how specific a rule is — higher = more specific.
+  // Used by evaluate() and disabled() so that exact rules beat wildcards
+  // regardless of array position.
+  function rank(rule: Rule): number {
+    let s = 0
+    if (!rule.permission.includes("*") && !rule.permission.includes("?")) s += 2
+    else if (rule.permission !== "*") s += 1
+    if (!rule.pattern.includes("*") && !rule.pattern.includes("?")) s += 2
+    else if (rule.pattern !== "*") s += 1
+    return s
+  }
+
   export function evaluate(permission: string, pattern: string, ...rulesets: Ruleset[]): Rule {
     const merged = merge(...rulesets)
     log.info("evaluate", { permission, pattern, ruleset: merged })
-    const match = merged.findLast(
-      (rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern),
-    )
-    return match ?? { action: "ask", permission, pattern: "*" }
+    let best: Rule | undefined
+    let score = -1
+    for (const rule of merged) {
+      if (!Wildcard.match(permission, rule.permission)) continue
+      if (!Wildcard.match(pattern, rule.pattern)) continue
+      const s = rank(rule)
+      if (s >= score) {
+        best = rule
+        score = s
+      }
+    }
+    return best ?? { action: "ask", permission, pattern: "*" }
   }
 
   const EDIT_TOOLS = ["edit", "write", "patch", "multiedit"]
@@ -249,9 +290,24 @@ export namespace PermissionNext {
     for (const tool of tools) {
       const permission = EDIT_TOOLS.includes(tool) ? "edit" : tool
 
-      const rule = ruleset.findLast((r) => Wildcard.match(permission, r.permission))
-      if (!rule) continue
-      if (rule.pattern === "*" && rule.action === "deny") result.add(tool)
+      // Find the most-specific permission-matching rule whose pattern is "*"
+      let best: Rule | undefined
+      let score = -1
+      let partial = false
+      for (const rule of ruleset) {
+        if (!Wildcard.match(permission, rule.permission)) continue
+        if (rule.pattern === "*") {
+          const s = rank(rule)
+          if (s >= score) {
+            best = rule
+            score = s
+          }
+        }
+        // A non-wildcard pattern with "allow" means partial usage exists
+        if (rule.pattern !== "*" && rule.action === "allow") partial = true
+      }
+      if (!best) continue
+      if (best.action === "deny" && !partial) result.add(tool)
     }
     return result
   }

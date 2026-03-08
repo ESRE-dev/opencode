@@ -93,8 +93,20 @@ export const BashTool = Tool.define("bash", async () => {
       for (const node of tree.rootNode.descendantsOfType("command")) {
         if (!node) continue
 
-        // Get full command text including redirects if present
-        let commandText = node.parent?.type === "redirected_statement" ? node.parent.text : node.text
+        // Get full command text including redirects if present.
+        // Strip leading variable assignments (e.g. FOO=bar cmd → cmd)
+        // so patterns match the actual command, not the env prefix.
+        let envEnd = 0
+        for (let i = 0; i < node.childCount; i++) {
+          const child = node.child(i)
+          if (!child || child.type !== "variable_assignment") break
+          envEnd = child.endIndex - node.startIndex
+        }
+        const stripped = envEnd > 0 ? node.text.slice(envEnd).trimStart() : node.text
+        let commandText =
+          node.parent?.type === "redirected_statement"
+            ? stripped + node.parent.text.slice(node.endIndex - node.parent.startIndex)
+            : stripped
 
         const command = []
         for (let i = 0; i < node.childCount; i++) {

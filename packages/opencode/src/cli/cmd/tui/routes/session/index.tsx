@@ -133,13 +133,16 @@ export function Session() {
     if (!root) return []
     const all = sync.data.session
     const result: typeof all = []
+    const visited = new Set<string>()
     const queue = [root]
     while (queue.length) {
       const id = queue.shift()!
+      if (visited.has(id)) continue
+      visited.add(id)
       const match = all.find((x) => x.id === id)
       if (match) result.push(match)
       for (const child of all) {
-        if (child.parentID === id) queue.push(child.id)
+        if (child.parentID === id && !visited.has(child.id)) queue.push(child.id)
       }
     }
     return result

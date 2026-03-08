@@ -22,7 +22,9 @@ export namespace SessionProcessor {
   const log = Log.create({ service: "session.processor" })
 
   /** Recursively mark running tool parts as "error" for a child session and its descendants. */
-  async function abortChildren(sessionID: string) {
+  async function abortChildren(sessionID: string, visited = new Set<string>()) {
+    if (visited.has(sessionID)) return
+    visited.add(sessionID)
     const msgs = await Session.messages({ sessionID })
     for (const msg of msgs) {
       for (const part of msg.parts) {
@@ -30,7 +32,7 @@ export namespace SessionProcessor {
         if (part.state.status === "completed" || part.state.status === "error") continue
         // If this is a task tool with a child session, recurse first
         if (part.tool === "task" && part.state.status === "running" && part.state.metadata?.sessionId) {
-          await abortChildren(part.state.metadata.sessionId)
+          await abortChildren(part.state.metadata.sessionId, visited)
         }
         await Session.updatePart({
           ...part,

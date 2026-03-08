@@ -185,12 +185,13 @@ test("evaluate - last matching rule wins", () => {
   expect(result.action).toBe("deny")
 })
 
-test("evaluate - last matching rule wins (wildcard after specific)", () => {
+test("evaluate - specific pattern wins over later wildcard", () => {
+  // specificity: exact pattern (rm) beats wildcard (*) regardless of position
   const result = PermissionNext.evaluate("bash", "rm", [
     { permission: "bash", pattern: "rm", action: "deny" },
     { permission: "bash", pattern: "*", action: "allow" },
   ])
-  expect(result.action).toBe("allow")
+  expect(result.action).toBe("deny")
 })
 
 test("evaluate - glob pattern match", () => {
@@ -267,12 +268,13 @@ test("evaluate - exact match at end wins over earlier wildcard", () => {
   expect(result.action).toBe("deny")
 })
 
-test("evaluate - wildcard at end overrides earlier exact match", () => {
+test("evaluate - exact pattern wins over later wildcard", () => {
+  // specificity: exact pattern (/bin/rm) beats wildcard (*) regardless of position
   const result = PermissionNext.evaluate("bash", "/bin/rm", [
     { permission: "bash", pattern: "/bin/rm", action: "deny" },
     { permission: "bash", pattern: "*", action: "allow" },
   ])
-  expect(result.action).toBe("allow")
+  expect(result.action).toBe("deny")
 })
 
 // wildcard permission tests
@@ -327,13 +329,32 @@ test("evaluate - wildcard permission fallback for unknown tool", () => {
   expect(result.action).toBe("ask")
 })
 
-test("evaluate - permission patterns sorted by length regardless of object order", () => {
-  // specific permission listed before wildcard, but specific should still win
+test("evaluate - specific permission wins over wildcard regardless of order", () => {
+  // specificity: exact permission (bash) beats wildcard (*) regardless of position
   const result = PermissionNext.evaluate("bash", "rm", [
     { permission: "bash", pattern: "*", action: "allow" },
     { permission: "*", pattern: "*", action: "deny" },
   ])
-  // With flat list, last matching rule wins - so "*" matches bash and wins
+  expect(result.action).toBe("allow")
+})
+
+test("evaluate - specificity: exact permission+pattern beats all wildcards", () => {
+  const result = PermissionNext.evaluate("bash", "rm", [
+    { permission: "*", pattern: "*", action: "deny" },
+    { permission: "bash", pattern: "rm", action: "allow" },
+    { permission: "*", pattern: "rm", action: "deny" },
+  ])
+  // bash+rm (rank 4) beats *+rm (rank 2) and *+* (rank 0)
+  expect(result.action).toBe("allow")
+})
+
+test("evaluate - specificity: same rank uses last-match tiebreak", () => {
+  const result = PermissionNext.evaluate("edit", "src/foo.ts", [
+    { permission: "edit", pattern: "src/*", action: "allow" },
+    { permission: "edit", pattern: "lib/*", action: "deny" },
+    { permission: "edit", pattern: "src/*", action: "deny" },
+  ])
+  // Both src/* rules have rank 3; last one wins
   expect(result.action).toBe("deny")
 })
 

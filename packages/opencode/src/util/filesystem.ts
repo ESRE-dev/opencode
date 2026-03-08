@@ -2,7 +2,7 @@ import { chmod, mkdir, readFile, writeFile } from "fs/promises"
 import { createWriteStream, existsSync, statSync } from "fs"
 import { lookup } from "mime-types"
 import { realpathSync } from "fs"
-import { dirname, join, relative } from "path"
+import { basename, dirname, join, relative } from "path"
 import { Readable } from "stream"
 import { pipeline } from "stream/promises"
 import { Glob } from "./glob"
@@ -133,6 +133,25 @@ export namespace Filesystem {
 
   export function contains(parent: string, child: string) {
     return !relative(parent, child).startsWith("..")
+  }
+
+  /**
+   * Resolve symlinks in a path. If the file doesn't exist yet (new file),
+   * resolve the parent directory and append the filename.
+   */
+  export function realpath(p: string): string {
+    try {
+      return realpathSync.native(p)
+    } catch {
+      // File doesn't exist — resolve parent dir instead
+      const dir = dirname(p)
+      const base = basename(p)
+      try {
+        return join(realpathSync.native(dir), base)
+      } catch {
+        return p
+      }
+    }
   }
 
   export async function findUp(target: string, start: string, stop?: string) {
