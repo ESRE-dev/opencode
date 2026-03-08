@@ -200,23 +200,9 @@ export namespace ProviderError {
       }
     }
 
-    // Copilot gateway returns bare HTTP 400 "Bad Request" (text/plain) when
-    // context exceeds limits. No structured error body is provided.
-    // Known overlap: upstream #14488 (empty tool descriptions) also triggers
-    // bare 400s — compaction is still preferable to terminal failure.
-    if (
-      input.providerID.includes("github-copilot") &&
-      input.error.statusCode === 400 &&
-      input.error.responseBody &&
-      !json(input.error.responseBody) &&
-      input.error.responseBody.trim().length < 100
-    ) {
-      return {
-        type: "context_overflow",
-        message: "GitHub Copilot gateway returned a bare 400, treating as context overflow",
-        responseBody: input.error.responseBody,
-      }
-    }
+    // Copilot gateway bare-400s (text/plain, no JSON body) are transient
+    // rate-limiting responses, NOT context overflow. isCopilotErrorRetryable()
+    // marks them retryable so retry.ts handles them with backoff.
 
     const metadata = input.error.url ? { url: input.error.url } : undefined
     return {
