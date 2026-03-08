@@ -125,6 +125,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
 
       const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
       const mcpKeys = Object.keys(await MCP.tools().catch(() => ({})))
+      const nested = !!(await Session.get(ctx.sessionID)).parentID
 
       const session = await iife(async () => {
         if (params.task_id) {
@@ -155,6 +156,15 @@ export const TaskTool = Tool.define("task", async (ctx) => {
                     action: "deny" as const,
                   },
                 ]),
+            ...(nested
+              ? [
+                  {
+                    permission: "question" as const,
+                    pattern: "*" as const,
+                    action: "deny" as const,
+                  },
+                ]
+              : []),
             ...(config.experimental?.primary_tools?.map((t) => ({
               pattern: "*",
               action: "allow" as const,
@@ -210,6 +220,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
             todowrite: false,
             todoread: false,
             ...(hasTaskPermission ? {} : { task: false }),
+            ...(nested ? { question: false } : {}),
             ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((t) => [t, false])),
           },
           parts: promptParts,
