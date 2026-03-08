@@ -13,6 +13,7 @@ import {
 } from "ai"
 import { mergeDeep, pipe } from "remeda"
 import { ProviderTransform } from "@/provider/transform"
+import { ProviderFallback } from "@/provider/fallback"
 import { Config } from "@/config/config"
 import { Instance } from "@/project/instance"
 import type { Agent } from "@/agent/agent"
@@ -64,6 +65,18 @@ export namespace LLM {
       Auth.get(input.model.providerID),
     ])
     const isCodex = provider.id === "openai" && auth?.type === "oauth"
+
+    // Resolve fallback provider if configured
+    const target = ProviderFallback.resolve(input.model.providerID, input.model.id, cfg.fallback)
+    let fallback: Awaited<ReturnType<typeof Provider.getLanguage>> | undefined
+    if (target) {
+      try {
+        const model = await Provider.getModel(target.providerID, target.modelID)
+        fallback = await Provider.getLanguage(model)
+      } catch {
+        l.warn("fallback unavailable", { target: `${target.providerID}/${target.modelID}` })
+      }
+    }
 
     const system = []
     system.push(
@@ -244,6 +257,7 @@ export namespace LLM {
               return args.params
             },
           },
+          ...(fallback ? [ProviderFallback.middleware(fallback)] : []),
         ],
       }),
       experimental_telemetry: {
