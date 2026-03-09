@@ -1,4 +1,5 @@
 - To regenerate the JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
+- To build a local dev binary and sign it for macOS, see `CUSTOM-BUILD.md` in the repo root.
 - ALWAYS USE PARALLEL TOOLS WHEN APPLICABLE.
 - The default branch in this repo is `dev`.
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
