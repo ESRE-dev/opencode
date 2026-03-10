@@ -448,6 +448,26 @@ export default function Layout(props: ParentProps) {
   useUpdatePolling()
   useSDKNotificationToasts()
 
+  const useFallbackToasts = () =>
+    onMount(() => {
+      let last = 0
+      const cooldown = 30_000
+      const unsub = globalSDK.event.listen((e) => {
+        if (e.details?.type !== "tui.toast.show") return
+        const props = e.details.properties as { title?: string; message: string; variant: string }
+        const now = Date.now()
+        if (now - last < cooldown) return
+        last = now
+        showToast({
+          title: props.title,
+          description: props.message,
+          duration: 5000,
+        })
+      })
+      onCleanup(unsub)
+    })
+  useFallbackToasts()
+
   function scrollToSession(sessionId: string, sessionKey: string) {
     if (!scrollContainerRef) return
     if (state.scrollSessionKey === sessionKey) return

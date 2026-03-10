@@ -861,7 +861,7 @@ describe("session.message-v2.fromError", () => {
         message:
           "Please reauthenticate with the copilot provider to ensure your credentials work properly with OpenCode.",
         statusCode: 403,
-        isRetryable: false,
+        isRetryable: true,
         responseHeaders: { "content-type": "application/json" },
         responseBody: '{"error":"forbidden"}',
         metadata: {

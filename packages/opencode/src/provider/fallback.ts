@@ -1,6 +1,8 @@
 import { APICallError, type LanguageModelMiddleware } from "ai"
 import type { LanguageModelV2 } from "@ai-sdk/provider"
 import { Log } from "@/util/log"
+import { Bus } from "@/bus"
+import { TuiEvent } from "@/cli/cmd/tui/event"
 
 // Copilot → Bedrock model ID mapping for provider fallback.
 // Bedrock inference-profile IDs use the us. cross-region prefix.
@@ -56,10 +58,13 @@ export namespace ProviderFallback {
   // wrapStream/wrapGenerate middleware catch block with the raw error.
   //
   // Fallback-worthy: transient gateway/rate errors where a different
-  // provider likely succeeds (429, 503, 500, bare-400 from Copilot),
+  // provider likely succeeds (403, 429, 503, 500, bare-400 from Copilot),
   // network failures (ECONNREFUSED, ECONNRESET, timeouts).
+  // 403 is included because the copilot gateway returns transient 403s
+  // for rate/capacity reasons; the fallback model table only maps copilot
+  // providers so this won't affect providers where 403 means real auth failure.
   //
-  // NOT fallback-worthy: auth failures (401/403 — different provider
+  // NOT fallback-worthy: auth failures (401 — different provider
   // has different creds, but the request shape is fine), context overflow
   // (413 / overflow patterns — needs compaction, not a provider switch),
   // and validation errors (prompt issues stay broken on any provider).
@@ -67,12 +72,12 @@ export namespace ProviderFallback {
     if (APICallError.isInstance(err)) {
       const status = err.statusCode
       // Auth errors — won't fix by switching provider
-      if (status === 401 || status === 403) return false
+      if (status === 401) return false
       // Context overflow — needs compaction
       if (status === 413) return false
       if (err.message && OVERFLOW.some((p) => p.test(err.message))) return false
-      // Rate limits and gateway errors — fallback
-      if (status === 429 || status === 503 || status === 500 || status === 502) return true
+      // Rate limits, gateway errors, and transient 403 — fallback
+      if (status === 429 || status === 503 || status === 500 || status === 502 || status === 403) return true
       // Copilot bare-400: text/plain body, no JSON — transient rate limit
       if (status === 400 && err.responseBody && !isJSON(err.responseBody)) return true
       // SDK-wrapped network errors: no statusCode but marked retryable
@@ -114,6 +119,11 @@ export namespace ProviderFallback {
             error: err instanceof Error ? err.message : String(err),
             status: APICallError.isInstance(err) ? err.statusCode : undefined,
           })
+          Bus.publish(TuiEvent.ToastShow, {
+            title: "Provider fallback activated",
+            message: `Switched to ${fallback.modelId}`,
+            variant: "warning",
+          })
           return await fallback.doGenerate(params)
         }
       },
@@ -126,6 +136,11 @@ export namespace ProviderFallback {
             target: fallback.modelId,
             error: err instanceof Error ? err.message : String(err),
             status: APICallError.isInstance(err) ? err.statusCode : undefined,
+          })
+          Bus.publish(TuiEvent.ToastShow, {
+            title: "Provider fallback activated",
+            message: `Switched to ${fallback.modelId}`,
+            variant: "warning",
           })
           return await fallback.doStream(params)
         }

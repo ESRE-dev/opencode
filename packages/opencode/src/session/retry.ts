@@ -58,11 +58,16 @@ export namespace SessionRetry {
     return Math.min(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1), RETRY_MAX_DELAY_NO_HEADERS)
   }
 
-  export function retryable(error: ReturnType<NamedError["toObject"]>) {
+  const COPILOT_403_MAX = 3
+
+  export function retryable(error: ReturnType<NamedError["toObject"]>, attempt?: number) {
     // context overflow errors should not be retried
     if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
     if (MessageV2.APIError.isInstance(error)) {
       if (!error.data.isRetryable) return undefined
+      // Copilot 403s are transient but cap retries — if we've already tried
+      // COPILOT_403_MAX times it's likely a real auth issue, not a blip.
+      if (error.data.statusCode === 403 && attempt !== undefined && attempt >= COPILOT_403_MAX) return undefined
       if (error.data.responseBody?.includes("FreeUsageLimitError"))
         return `Free usage exceeded, add credits https://opencode.ai/zen`
       return error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message

@@ -31,7 +31,10 @@ export namespace ProviderError {
 
   // Copilot gateway returns bare text 400s for transient issues.
   // These are gateway-level rejections, not model errors, and should be retried.
+  // 403s are also transient — the copilot gateway sometimes returns 403 for
+  // rate/capacity reasons that resolve on retry or fallback.
   function isCopilotErrorRetryable(e: APICallError) {
+    if (e.statusCode === 403) return true
     if (e.statusCode === 400 && e.responseBody && !json(e.responseBody)) return true
     return e.isRetryable ?? false
   }
