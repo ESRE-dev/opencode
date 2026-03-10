@@ -13,7 +13,8 @@ import { PermissionNext } from "@/permission/next"
 import { abortAfterAny } from "@/util/abort"
 import { MCP } from "../mcp"
 
-const DEFAULT_TIMEOUT = 600_000 // 10 minutes
+const DEFAULT_TIMEOUT = 14_400_000 // 4 hours — zombie/stall protection, not performance pressure
+const MIN_TIMEOUT = 1_800_000 // 30 minutes — floor for LLM-specified values
 
 const parameters = z.object({
   description: z.string().describe("A short (3-5 words) description of the task"),
@@ -30,14 +31,18 @@ const parameters = z.object({
     .number()
     .optional()
     .describe(
-      "Optional timeout in seconds. If the task doesn't complete within this time, it will be cancelled and return an error with the task_id for resumption. Default: 600 (10 minutes). Set higher (900-1800) for complex implementation tasks.",
+      "Optional timeout in seconds for zombie/stall protection. Default: 4 hours. Minimum: 30 minutes. You almost never need to set this — only override if you have a specific reason.",
     ),
 })
 
-async function childText(result: Awaited<ReturnType<typeof SessionPrompt.prompt>>, id: string) {
+async function childText(
+  result: Awaited<ReturnType<typeof SessionPrompt.prompt>>,
+  id: string,
+  opts?: { skipAbort?: boolean },
+) {
   if (result.info.role !== "assistant") return ""
   const error = result.info.error
-  if (error?.name === "MessageAbortedError") return "Task was cancelled by user."
+  if (error?.name === "MessageAbortedError" && !opts?.skipAbort) return "Task was cancelled by user."
   const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
   if (text) return text
   if (!error) return ""
@@ -203,7 +208,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
       const promptParts = await SessionPrompt.resolvePromptParts(params.prompt)
 
-      const ms = params.timeout ? params.timeout * 1000 : (config.experimental?.task_timeout ?? DEFAULT_TIMEOUT)
+      const ms = Math.max(
+        MIN_TIMEOUT,
+        params.timeout ? params.timeout * 1000 : (config.experimental?.task_timeout ?? DEFAULT_TIMEOUT),
+      )
       const deadline = abortAfterAny(ms, ctx.abort)
       deadline.signal.addEventListener("abort", cancel)
 
@@ -227,6 +235,28 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         })
 
         deadline.clearTimeout()
+
+        // Detect timeout: deadline fired but parent wasn't cancelled
+        if (deadline.signal.aborted && !ctx.abort.aborted) {
+          const limit = Math.round(ms / 1000)
+          const partial = await childText(result, session.id, { skipAbort: true })
+          const output = [
+            `TIMEOUT: Task exceeded ${limit}s deadline and was cancelled.`,
+            `task_id: ${session.id}`,
+            "",
+            ...(partial ? ["Partial output recovered from the timed-out session:", "", partial, ""] : []),
+            "You can resume this task by passing the task_id above.",
+            "Recommended: retry up to 5 times before giving up.",
+          ].join("\n")
+          return {
+            title: params.description,
+            metadata: {
+              sessionId: session.id,
+              model,
+            },
+            output,
+          }
+        }
 
         const text = await childText(result, session.id)
 
