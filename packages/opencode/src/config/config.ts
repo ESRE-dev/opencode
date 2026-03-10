@@ -1178,8 +1178,14 @@ export namespace Config {
             .positive()
             .optional()
             .describe(
-              "Default timeout in milliseconds for Task tool sub-agent execution (default: 300000 = 5 minutes)",
+              "Default timeout in milliseconds for Task tool sub-agent execution (default: 600000 = 10 minutes)",
             ),
+          tool_timeout: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe("Global timeout in milliseconds for individual tool executions (default: 900000 = 15 minutes)"),
         })
         .optional(),
     })

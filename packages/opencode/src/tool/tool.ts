@@ -4,8 +4,18 @@ import type { Agent } from "../agent/agent"
 import type { PermissionNext } from "../permission/next"
 import { Truncate } from "./truncation"
 import { abortAfterAny, raceSignal } from "../util/abort"
+import { Config } from "../config/config"
 
 const TOOL_TIMEOUT = 15 * 60 * 1000
+
+/** Compute the effective timeout for a tool execution. Exported for testing. */
+export function timeout(input: { id: string; args: any; tool?: number; task?: number }): number {
+  const base = input.tool ?? TOOL_TIMEOUT
+  if (input.id !== "task") return base
+  const GRACE = 60_000
+  const effective = typeof input.args?.timeout === "number" ? input.args.timeout * 1000 : (input.task ?? 600_000)
+  return Math.max(base, effective + GRACE)
+}
 
 export namespace Tool {
   interface Metadata {
@@ -69,12 +79,24 @@ export namespace Tool {
               { cause: error },
             )
           }
-          const deadline = abortAfterAny(TOOL_TIMEOUT, ctx.abort)
+          let ms = TOOL_TIMEOUT
+          try {
+            const cfg = await Config.get()
+            ms = timeout({
+              id,
+              args,
+              tool: cfg.experimental?.tool_timeout,
+              task: cfg.experimental?.task_timeout,
+            })
+          } catch {
+            // No Instance context (e.g., unit tests) — use hardcoded default
+          }
+          const deadline = abortAfterAny(ms, ctx.abort)
           try {
             const result = await raceSignal(
               execute(args, { ...ctx, abort: deadline.signal }),
               deadline.signal,
-              "Tool execution exceeded 15min global timeout",
+              `Tool execution exceeded ${Math.round(ms / 1000)}s global timeout`,
             )
             // skip truncation for tools that handle it themselves
             if (result.metadata.truncated !== undefined) {

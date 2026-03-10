@@ -15,6 +15,7 @@ import { Truncate } from "../tool/truncation"
 import { Database, sql } from "../storage/db"
 import { PartTable } from "../session/session.sql"
 import { SessionPrompt } from "../session/prompt"
+import { Config } from "../config/config"
 
 const log = Log.create({ service: "bootstrap" })
 
@@ -161,12 +162,23 @@ export function watchdogTick(cutoff: number) {
 }
 
 /**
- * Periodic scan for tool parts stuck in "running" beyond MAX_RUNNING.
+ * Periodic scan for tool parts stuck in "running" beyond the configured timeout.
  * Safety net for cases where the bash hard-stop or abort signal also fails.
+ * Respects both tool_timeout and task_timeout config to avoid killing
+ * long-running but healthy Task tool executions.
  */
 function watchdog() {
-  const timer = setInterval(() => {
-    watchdogTick(Date.now() - MAX_RUNNING)
+  const timer = setInterval(async () => {
+    try {
+      const cfg = await Config.get()
+      const base = cfg.experimental?.tool_timeout ?? MAX_RUNNING
+      const task = cfg.experimental?.task_timeout ?? 600_000
+      const grace = 60_000
+      const max = Math.max(base, task + grace)
+      watchdogTick(Date.now() - max)
+    } catch {
+      watchdogTick(Date.now() - MAX_RUNNING)
+    }
   }, WATCHDOG_INTERVAL)
   timer.unref()
 }
