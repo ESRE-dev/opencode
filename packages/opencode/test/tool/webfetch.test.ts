@@ -97,4 +97,41 @@ describe("tool.webfetch", () => {
       },
     )
   })
+
+  test("returns structured output for HTTP errors instead of throwing", async () => {
+    await withFetch(
+      async () => new Response("Not Found", { status: 404, statusText: "Not Found" }),
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            const result = await webfetch.execute({ url: "https://example.com/missing", format: "markdown" }, ctx)
+            expect(result.title).toContain("HTTP 404")
+            expect(result.output).toContain("HTTP 404")
+            expect(result.output).toContain("not found")
+            expect(result.output).toContain("Do NOT give up")
+          },
+        })
+      },
+    )
+  })
+
+  test("returns structured output for 500 errors", async () => {
+    await withFetch(
+      async () => new Response("Internal Server Error", { status: 500, statusText: "Internal Server Error" }),
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            const result = await webfetch.execute({ url: "https://example.com/broken", format: "markdown" }, ctx)
+            expect(result.title).toContain("HTTP 500")
+            expect(result.output).toContain("HTTP 500")
+            expect(result.output).toContain("Internal server error")
+          },
+        })
+      },
+    )
+  })
 })

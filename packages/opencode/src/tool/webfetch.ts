@@ -73,18 +73,42 @@ export const WebFetchTool = Tool.define("webfetch", {
     clearTimeout()
 
     if (!response.ok) {
-      throw new Error(`Request failed with status code: ${response.status}`)
+      const hints: Record<number, string> = {
+        301: "The page has permanently moved. Check the Location header or search for the new URL.",
+        302: "The page has temporarily moved. Check the Location header or try following redirects.",
+        403: "Access is forbidden. The server refused the request. Try a different source.",
+        404: "The page was not found. It may have been moved or deleted. Try searching for the content with a different URL or a web search tool.",
+        410: "The page is permanently gone. Try searching for the content with a web search tool.",
+        429: "Rate limited. Wait briefly and retry, or try a different source.",
+        500: "Internal server error. Try again later or use a different source.",
+        502: "Bad gateway. Try again later or use a different source.",
+        503: "Service unavailable. The server is temporarily overloaded. Try again later.",
+      }
+      const hint = hints[response.status] ?? "Try an alternative URL or a web search tool to find the content."
+      return {
+        title: `${params.url} - HTTP ${response.status}`,
+        output: [
+          `HTTP ${response.status}: ${response.statusText || "Error"}`,
+          hint,
+          "Do NOT give up. Try an alternative approach to find this information.",
+        ].join("\n\n"),
+        metadata: {},
+      }
     }
 
     // Check content length
     const contentLength = response.headers.get("content-length")
     if (contentLength && parseInt(contentLength) > MAX_RESPONSE_SIZE) {
-      throw new Error("Response too large (exceeds 5MB limit)")
+      throw new Error(
+        "Response too large (exceeds 5MB limit). Try fetching a more specific page or use a web search tool instead.",
+      )
     }
 
     const arrayBuffer = await response.arrayBuffer()
     if (arrayBuffer.byteLength > MAX_RESPONSE_SIZE) {
-      throw new Error("Response too large (exceeds 5MB limit)")
+      throw new Error(
+        "Response too large (exceeds 5MB limit). Try fetching a more specific page or use a web search tool instead.",
+      )
     }
 
     const contentType = response.headers.get("content-type") || ""
