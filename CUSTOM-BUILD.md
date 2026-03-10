@@ -1,14 +1,14 @@
 # Custom Build
 
-Local fork of OpenCode with sub-agent fixes and task timeout.
+Local fork of OpenCode with sub-agent fixes, task timeout, configurable tool timeout, and prefill fix.
 
-Based on [`anomalyco/opencode`](https://github.com/anomalyco/opencode) at commit `7da24ebf5` on the `dev` branch. This build fixes sub-agent hanging, nested TUI navigation, cancel UX, and adds an LLM-controllable Task tool timeout.
+Based on [`anomalyco/opencode`](https://github.com/anomalyco/opencode) at commit `7da24ebf5` on the `dev` branch. This build fixes sub-agent hanging, nested TUI navigation, cancel UX, adds an LLM-controllable Task tool timeout, makes the global tool timeout configurable, and fixes assistant prefill for Copilot Claude models.
 
 ---
 
 ## Changes made
 
-Four change sets are included. One is custom, the other three come from upstream PRs.
+Six change sets are included. Three are custom, the other three come from upstream PRs.
 
 ---
 
@@ -23,6 +23,28 @@ Default is 5 minutes (300,000ms). User cancellation still works normally -- the 
 **`packages/opencode/src/tool/task.txt`** -- Added usage note #7 documenting the timeout behavior for the LLM.
 
 **`packages/opencode/src/config/config.ts`** (~line 1169) -- Added `task_timeout` to the `experimental` config schema, following the `mcp_timeout` precedent. Lets users set a default timeout via `opencode.json`.
+
+---
+
+### Configurable global tool timeout (custom)
+
+Makes the hardcoded 15-minute global tool timeout configurable and lets the Task tool extend it for long-running sub-agent sessions.
+
+**`packages/opencode/src/tool/tool.ts`** -- Extracted timeout computation into an exported `timeout()` function. The `Tool.define` wrapper reads `config.experimental.tool_timeout` (with try/catch fallback for unit tests). For `id === "task"`, computes `Math.max(base, effective_task_timeout + 60s_grace)` so the Task tool's own timeout fires first and returns a clean error.
+
+**`packages/opencode/src/project/bootstrap.ts`** -- Watchdog reads config each tick and uses `Math.max(tool_timeout, task_timeout + 60s)` as its cutoff. Falls back to 15min hardcoded default on error.
+
+**`packages/opencode/src/config/config.ts`** (~line 1183) -- Added `tool_timeout` to the `experimental` config schema. Also fixed the pre-existing `task_timeout` description from "5 minutes" to "10 minutes" (matching the actual DEFAULT_TIMEOUT in task.ts).
+
+**`packages/opencode/test/tool/timeout.test.ts`** -- 14 unit tests for the timeout computation.
+
+---
+
+### Prefill fix for Copilot Claude models (custom)
+
+Fixes "This model does not support assistant message prefill" error when Copilot Claude models hit max agent steps.
+
+**`packages/opencode/src/session/prompt.ts`** (lines 675-689) -- Changed the `isLastStep` prefill check from name heuristics (`model.id.includes("claude")`) to checking `model.api.npm` for the three SDKs that actually support prefill: `@ai-sdk/anthropic`, `@ai-sdk/google-vertex/anthropic`, and `@ai-sdk/amazon-bedrock` (for anthropic models only).
 
 ---
 
@@ -164,19 +186,21 @@ Add this to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.) to make it perman
 
 ## Configure the timeout
 
-Add `task_timeout` to `opencode.json`:
+Add timeout settings to `opencode.json`:
 
 ```json
 {
   "experimental": {
-    "task_timeout": 300000
+    "task_timeout": 600000,
+    "tool_timeout": 900000
   }
 }
 ```
 
-Default is 300,000ms (5 minutes). Set to `0` to disable the timeout (not recommended).
+- `task_timeout`: Default timeout for Task tool sub-agents in milliseconds (default: 600,000ms = 10 minutes). The LLM can also override this per-task via the `timeout` parameter on the Task tool schema.
+- `tool_timeout`: Global timeout for all individual tool executions in milliseconds (default: 900,000ms = 15 minutes). The Task tool automatically gets extra headroom (task timeout + 60s grace) so its own timeout fires first.
 
-The LLM can also override this per-task via the `timeout` parameter on the Task tool schema.
+The watchdog safety net also respects these values.
 
 ---
 
