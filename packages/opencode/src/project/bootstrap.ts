@@ -172,7 +172,7 @@ function watchdog() {
     try {
       const cfg = await Config.get()
       const base = cfg.experimental?.tool_timeout ?? MAX_RUNNING
-      const task = cfg.experimental?.task_timeout ?? 600_000
+      const task = cfg.experimental?.task_timeout ?? 1_800_000
       const grace = 60_000
       const max = Math.max(base, task + grace)
       watchdogTick(Date.now() - max)

@@ -8,13 +8,9 @@ import { Config } from "../config/config"
 
 const TOOL_TIMEOUT = 15 * 60 * 1000
 
-/** Compute the effective timeout for a tool execution. Exported for testing. */
-export function timeout(input: { id: string; args: any; tool?: number; task?: number }): number {
-  const base = input.tool ?? TOOL_TIMEOUT
-  if (input.id !== "task") return base
-  const GRACE = 60_000
-  const effective = typeof input.args?.timeout === "number" ? input.args.timeout * 1000 : (input.task ?? 600_000)
-  return Math.max(base, effective + GRACE)
+/** Compute the effective timeout for a non-task tool execution. Exported for testing. */
+export function timeout(input: { tool?: number }): number {
+  return input.tool ?? TOOL_TIMEOUT
 }
 
 export namespace Tool {
@@ -79,15 +75,27 @@ export namespace Tool {
               { cause: error },
             )
           }
+          // Task tool manages its own deadline inside task.ts — skip the
+          // outer raceSignal wrapper so nested tasks aren't starved of time.
+          if (id === "task") {
+            const result = await execute(args, ctx)
+            if (result.metadata.truncated !== undefined) return result
+            const truncated = await Truncate.output(result.output, {}, initCtx?.agent)
+            return {
+              ...result,
+              output: truncated.content,
+              metadata: {
+                ...result.metadata,
+                truncated: truncated.truncated,
+                ...(truncated.truncated && { outputPath: truncated.outputPath }),
+              },
+            }
+          }
+
           let ms = TOOL_TIMEOUT
           try {
             const cfg = await Config.get()
-            ms = timeout({
-              id,
-              args,
-              tool: cfg.experimental?.tool_timeout,
-              task: cfg.experimental?.task_timeout,
-            })
+            ms = timeout({ tool: cfg.experimental?.tool_timeout })
           } catch {
             // No Instance context (e.g., unit tests) — use hardcoded default
           }

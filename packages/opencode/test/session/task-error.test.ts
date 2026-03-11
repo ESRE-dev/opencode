@@ -653,7 +653,7 @@ describe("task-error: timeout and hang scenarios", () => {
           const output = tp.state.output as string
           expect(output).toContain("task_id:")
           // Child was cancelled by timeout
-          expect(output).toContain("Task was cancelled")
+          expect(output).toContain("TIMEOUT:")
         }
       },
     })

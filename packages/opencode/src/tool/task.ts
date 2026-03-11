@@ -208,10 +208,12 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
       const promptParts = await SessionPrompt.resolvePromptParts(params.prompt)
 
-      const ms = Math.max(
-        MIN_TIMEOUT,
-        params.timeout ? params.timeout * 1000 : (config.experimental?.task_timeout ?? DEFAULT_TIMEOUT),
-      )
+      const cfg_timeout = config.experimental?.task_timeout
+      const raw = params.timeout ? params.timeout * 1000 : (cfg_timeout ?? DEFAULT_TIMEOUT)
+      // MIN_TIMEOUT guards against LLM-specified timeouts that are too short.
+      // When the user explicitly configures task_timeout, they control timeout
+      // policy and the floor is not applied.
+      const ms = params.timeout && !cfg_timeout ? Math.max(MIN_TIMEOUT, raw) : raw
       const deadline = abortAfterAny(ms, ctx.abort)
       deadline.signal.addEventListener("abort", cancel)
 
