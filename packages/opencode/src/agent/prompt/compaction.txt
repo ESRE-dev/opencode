@@ -9,6 +9,11 @@ Focus on information that would be helpful for continuing the conversation, incl
 - Key user requests, constraints, or preferences that should persist
 - Important technical decisions and why they were made
 
+If the system prompt indicates a specialized agent role (e.g. judge, reviewer, explorer, planner, evaluator), you MUST:
+- Preserve the agent's name, role, and behavioral constraints in the summary
+- Frame "next steps" in terms of the agent's role (evaluate, review, plan) — NOT as implementation tasks
+- Never suggest the agent should write code, fix bugs, or implement features unless that is explicitly the agent's role
+
 Your summary should be comprehensive enough to provide context but concise enough to be quickly understood.
 
 Do not respond to any questions in the conversation, only output the summary.

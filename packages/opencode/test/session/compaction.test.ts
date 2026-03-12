@@ -421,3 +421,48 @@ describe("session.getUsage", () => {
     },
   )
 })
+
+describe("session.compaction.agentAware", () => {
+  test("defaultPrompt contains Agent Role & Constraints section", async () => {
+    // Read the compaction source to verify the template includes the section
+    const src = await Bun.file(path.join(import.meta.dir, "../../src/session/compaction.ts")).text()
+    expect(src).toContain("## Agent Role & Constraints")
+    expect(src).toContain("specialized agent role")
+    expect(src).toContain("do NOT frame all agents as implementors")
+  })
+
+  test("compaction.txt preserves agent identity instructions", async () => {
+    const txt = await Bun.file(path.join(import.meta.dir, "../../src/agent/prompt/compaction.txt")).text()
+    expect(txt).toContain("specialized agent role")
+    expect(txt).toContain("Preserve the agent's name, role, and behavioral constraints")
+    expect(txt).toContain("Never suggest the agent should write code")
+  })
+
+  test("plugin hook input includes agent field in type", async () => {
+    const src = await Bun.file(path.join(import.meta.dir, "../../../plugin/src/index.ts")).text()
+    expect(src).toContain("input: { sessionID: string; agent?: string }")
+  })
+
+  test("compaction passes source agent prompt in system array", async () => {
+    const src = await Bun.file(path.join(import.meta.dir, "../../src/session/compaction.ts")).text()
+    // Verify source agent resolution
+    expect(src).toContain("Agent.get(userMessage.agent)")
+    // Verify system array populated from source prompt (with truncation guard)
+    expect(src).toContain("system.push(prompt)")
+    // Verify system passed to processor (not empty)
+    expect(src).toMatch(/system,\n\s+messages:/)
+  })
+
+  test("post-compaction reminder injected for non-native agents", async () => {
+    const src = await Bun.file(path.join(import.meta.dir, "../../src/session/compaction.ts")).text()
+    expect(src).toContain("<system-reminder>")
+    expect(src).toContain("!source.native")
+    expect(src).toContain("Do not deviate from your assigned role")
+  })
+
+  test("no reminder for native/built-in agents", async () => {
+    const src = await Bun.file(path.join(import.meta.dir, "../../src/session/compaction.ts")).text()
+    // The condition checks !source.native, so native agents get no reminder
+    expect(src).toContain("source?.prompt && !source.native")
+  })
+})

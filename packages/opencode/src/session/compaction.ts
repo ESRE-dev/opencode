@@ -167,7 +167,7 @@ export namespace SessionCompaction {
     // Allow plugins to inject context or replace compaction prompt
     const compacting = await Plugin.trigger(
       "experimental.session.compacting",
-      { sessionID: input.sessionID },
+      { sessionID: input.sessionID, agent: userMessage.agent },
       { context: [], prompt: undefined },
     )
     const defaultPrompt = `Provide a detailed prompt for continuing our conversation above.
@@ -176,6 +176,10 @@ The summary that you construct will be used so that another agent can read it an
 
 When constructing the summary, try to stick to this template:
 ---
+## Agent Role & Constraints
+
+[If the system prompt indicates a specialized agent role (e.g. evaluator, reviewer, judge, explorer, planner), state the agent name, its role, and any behavioral constraints (read-only, no implementation, output format requirements). If the agent is a general-purpose implementor, write "Default agent — no special constraints." Frame next steps in terms appropriate to the agent's role: evaluators should evaluate, reviewers should review, planners should plan — do NOT frame all agents as implementors.]
+
 ## Goal
 
 [What goal(s) is the user trying to accomplish?]
@@ -198,6 +202,16 @@ When constructing the summary, try to stick to this template:
 [Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the path to the directory.]
 ---`
 
+    // Resolve the source agent to preserve its identity during compaction
+    const source = await Agent.get(userMessage.agent)
+    const system: string[] = []
+    if (source?.prompt) {
+      // Cap source agent prompt to avoid overflowing the compaction model's context
+      const max = 4000
+      const prompt = source.prompt.length > max ? source.prompt.slice(0, max) + "\n[...truncated]" : source.prompt
+      system.push(prompt)
+    }
+
     const promptText = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
     const result = await processor.process({
       user: userMessage,
@@ -205,7 +219,7 @@ When constructing the summary, try to stick to this template:
       abort: input.abort,
       sessionID: input.sessionID,
       tools: {},
-      system: [],
+      system,
       messages: [
         ...MessageV2.toModelMessages(messages, model, { stripMedia: true }),
         {
@@ -233,6 +247,12 @@ When constructing the summary, try to stick to this template:
     }
 
     if (result === "continue" && input.auto) {
+      // Inject post-compaction agent identity reminder for specialized agents
+      const reminder =
+        source?.prompt && !source.native
+          ? `<system-reminder>You are the "${userMessage.agent}" agent. Your role and constraints from your system prompt still apply after this compaction. Do not deviate from your assigned role.</system-reminder>`
+          : undefined
+
       if (replay) {
         const original = replay.info as MessageV2.User
         const replayMsg = await Session.updateMessage({
@@ -260,6 +280,17 @@ When constructing the summary, try to stick to this template:
             sessionID: input.sessionID,
           })
         }
+        if (reminder) {
+          await Session.updatePart({
+            id: Identifier.ascending("part"),
+            messageID: replayMsg.id,
+            sessionID: input.sessionID,
+            type: "text",
+            synthetic: true,
+            text: reminder,
+            time: { start: Date.now(), end: Date.now() },
+          })
+        }
       } else {
         const continueMsg = await Session.updateMessage({
           id: Identifier.ascending("message"),
@@ -280,7 +311,7 @@ When constructing the summary, try to stick to this template:
           sessionID: input.sessionID,
           type: "text",
           synthetic: true,
-          text,
+          text: reminder ? text + "\n\n" + reminder : text,
           time: {
             start: Date.now(),
             end: Date.now(),
