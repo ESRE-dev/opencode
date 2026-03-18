@@ -1186,6 +1186,14 @@ export namespace Config {
             .positive()
             .optional()
             .describe("Global timeout in milliseconds for individual tool executions (default: 900000 = 15 minutes)"),
+          idle_timeout: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe(
+              "Inactivity timeout in milliseconds for subagent sessions. A subagent with no token streaming or tool activity for this long is cancelled (default: 300000 = 5 minutes). Root sessions are exempt.",
+            ),
         })
         .optional(),
     })

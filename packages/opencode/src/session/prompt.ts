@@ -2,6 +2,7 @@ import path from "path"
 import os from "os"
 import fs from "fs/promises"
 import z from "zod"
+import { SessionActivity } from "./activity"
 import { Filesystem } from "../util/filesystem"
 import { Identifier } from "../id/id"
 import { MessageV2 } from "./message-v2"
@@ -260,6 +261,7 @@ export namespace SessionPrompt {
     const match = s[sessionID]
     if (!match) {
       SessionStatus.set(sessionID, { type: "idle" })
+      SessionActivity.remove(sessionID)
       return
     }
     match.abort.abort()
@@ -267,6 +269,7 @@ export namespace SessionPrompt {
     // Reject any pending permission/question promises so tool calls unblock
     PermissionNext.rejectSession(sessionID).catch(() => {})
     Question.rejectSession(sessionID).catch(() => {})
+    SessionActivity.remove(sessionID)
     SessionStatus.set(sessionID, { type: "idle" })
     return
   }

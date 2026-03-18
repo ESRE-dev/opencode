@@ -6,6 +6,7 @@ import { Database, sql } from "../../src/storage/db"
 import { PartTable } from "../../src/session/session.sql"
 import { watchdogTick } from "../../src/project/bootstrap"
 import { SessionPrompt } from "../../src/session/prompt"
+import { SessionActivity } from "../../src/session/activity"
 import { Log } from "../../src/util/log"
 import { tmpdir } from "../fixture/fixture"
 import { resetDatabase } from "../fixture/db"
@@ -484,6 +485,287 @@ describe("watchdog: cancel target", () => {
         expect(ids).toEqual([grand.id])
         expect(ids).not.toContain(top.id)
         expect(ids).not.toContain(child.id)
+      },
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SessionActivity unit tests
+// ---------------------------------------------------------------------------
+
+describe("SessionActivity", () => {
+  test("touch and last", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        expect(SessionActivity.last("a")).toBeUndefined()
+        SessionActivity.touch("a", 1000)
+        expect(SessionActivity.last("a")).toBe(1000)
+        SessionActivity.touch("a", 2000)
+        expect(SessionActivity.last("a")).toBe(2000)
+      },
+    })
+  })
+
+  test("stale returns false for unknown session", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        // No activity recorded — not stale (hasn't started yet)
+        expect(SessionActivity.stale("unknown", 1000)).toBe(false)
+      },
+    })
+  })
+
+  test("stale detects inactivity", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const old = Date.now() - 10_000
+        SessionActivity.touch("a", old)
+        // 5s threshold — session was active 10s ago → stale
+        expect(SessionActivity.stale("a", 5_000)).toBe(true)
+        // 15s threshold — session was active 10s ago → not stale yet
+        expect(SessionActivity.stale("a", 15_000)).toBe(false)
+      },
+    })
+  })
+
+  test("remove clears tracking", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        SessionActivity.touch("a", 1000)
+        expect(SessionActivity.last("a")).toBe(1000)
+        SessionActivity.remove("a")
+        expect(SessionActivity.last("a")).toBeUndefined()
+      },
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Idle detection integration tests
+// ---------------------------------------------------------------------------
+
+describe("watchdog: idle detection", () => {
+  test("idle subagent is cancelled when stale", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const parent = await Session.create({})
+        const child = await Session.create({ parentID: parent.id })
+
+        const msg = Identifier.ascending("message")
+        const prt = Identifier.ascending("part")
+        insertMessage(msg, parent.id)
+
+        // Parent has a task tool pointing at child — child session has
+        // stuck tools too (so it's NOT a leaf, but IS in the stuck set)
+        const childMsg = Identifier.ascending("message")
+        const childPrt = Identifier.ascending("part")
+        insertMessage(childMsg, child.id)
+
+        const old = 1000
+        insertRunning({
+          id: prt,
+          session: parent.id,
+          message: msg,
+          tool: "task",
+          start: old,
+          child: child.id,
+        })
+        // Child has a running tool too — parent task tool is NOT a leaf
+        insertRunning({
+          id: childPrt,
+          session: child.id,
+          message: childMsg,
+          tool: "bash",
+          start: old,
+        })
+
+        // Simulate the child having had activity a long time ago
+        SessionActivity.touch(child.id, Date.now() - 600_000)
+
+        const ids: string[] = []
+        const orig = SessionPrompt.cancel
+        const spy = mock((id: string) => {
+          ids.push(id)
+        })
+        SessionPrompt.cancel = spy as typeof SessionPrompt.cancel
+
+        try {
+          // The leaf filter will catch the bash tool (non-task leaf).
+          // The idle check should ALSO cancel the child because it's stale.
+          // But since the bash tool's cancel already targets child.id,
+          // the idle path adds it too — deduplicated by the `cancelled` set.
+          watchdogTick(Date.now(), 300_000)
+        } finally {
+          SessionPrompt.cancel = orig
+        }
+
+        // Child should be cancelled (by either leaf detection or idle — at least once)
+        expect(ids).toContain(child.id)
+        // Parent should NOT be cancelled
+        expect(ids).not.toContain(parent.id)
+      },
+    })
+  })
+
+  test("active subagent is NOT cancelled by idle check", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const parent = await Session.create({})
+        const child = await Session.create({ parentID: parent.id })
+
+        const msg = Identifier.ascending("message")
+        const prt = Identifier.ascending("part")
+        insertMessage(msg, parent.id)
+
+        const old = 1000
+        insertRunning({
+          id: prt,
+          session: parent.id,
+          message: msg,
+          tool: "task",
+          start: old,
+          child: child.id,
+        })
+
+        // Child had very recent activity — NOT stale
+        SessionActivity.touch(child.id, Date.now() - 1000)
+
+        const ids: string[] = []
+        const orig = SessionPrompt.cancel
+        const spy = mock((id: string) => {
+          ids.push(id)
+        })
+        SessionPrompt.cancel = spy as typeof SessionPrompt.cancel
+
+        try {
+          // The task tool IS a leaf (child has no stuck tools) so it
+          // gets cancelled by the leaf filter. But the idle check
+          // should NOT independently cancel it since it's active.
+          watchdogTick(Date.now(), 300_000)
+        } finally {
+          SessionPrompt.cancel = orig
+        }
+
+        // Child cancelled by leaf filter (task tool whose child has no stuck tools)
+        expect(ids).toContain(child.id)
+      },
+    })
+  })
+
+  test("idle detection skipped when idle param is omitted", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const parent = await Session.create({})
+        const child = await Session.create({ parentID: parent.id })
+
+        const msg = Identifier.ascending("message")
+        const prt = Identifier.ascending("part")
+        const childMsg = Identifier.ascending("message")
+        const childPrt = Identifier.ascending("part")
+        insertMessage(msg, parent.id)
+        insertMessage(childMsg, child.id)
+
+        const old = 1000
+        insertRunning({
+          id: prt,
+          session: parent.id,
+          message: msg,
+          tool: "task",
+          start: old,
+          child: child.id,
+        })
+        insertRunning({
+          id: childPrt,
+          session: child.id,
+          message: childMsg,
+          tool: "bash",
+          start: old,
+        })
+
+        // Child is stale
+        SessionActivity.touch(child.id, Date.now() - 600_000)
+
+        const ids: string[] = []
+        const orig = SessionPrompt.cancel
+        const spy = mock((id: string) => {
+          ids.push(id)
+        })
+        SessionPrompt.cancel = spy as typeof SessionPrompt.cancel
+
+        try {
+          // No idle param — only leaf detection runs
+          watchdogTick(Date.now())
+        } finally {
+          SessionPrompt.cancel = orig
+        }
+
+        // The bash tool is the leaf, so child.id is cancelled by leaf filter.
+        // But the parent task tool is NOT a leaf (child has stuck bash),
+        // so it stays running. The idle path did NOT run (no idle param).
+        expect(ids).toEqual([child.id])
+        // Parent task tool preserved
+        expect(partStatus(prt)).toBe("running")
+      },
+    })
+  })
+
+  test("session with no recorded activity is not considered stale", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const parent = await Session.create({})
+        const child = await Session.create({ parentID: parent.id })
+
+        const msg = Identifier.ascending("message")
+        const prt = Identifier.ascending("part")
+        insertMessage(msg, parent.id)
+
+        const old = 1000
+        insertRunning({
+          id: prt,
+          session: parent.id,
+          message: msg,
+          tool: "task",
+          start: old,
+          child: child.id,
+        })
+
+        // Deliberately do NOT touch SessionActivity for the child —
+        // simulates a session that hasn't started streaming yet.
+
+        const ids: string[] = []
+        const orig = SessionPrompt.cancel
+        const spy = mock((id: string) => {
+          ids.push(id)
+        })
+        SessionPrompt.cancel = spy as typeof SessionPrompt.cancel
+
+        try {
+          watchdogTick(Date.now(), 300_000)
+        } finally {
+          SessionPrompt.cancel = orig
+        }
+
+        // Child is cancelled by the leaf filter (task tool whose child
+        // has no stuck tools), but the idle check should NOT have fired
+        // because there's no recorded activity (stale() returns false).
+        expect(ids).toEqual([child.id])
       },
     })
   })

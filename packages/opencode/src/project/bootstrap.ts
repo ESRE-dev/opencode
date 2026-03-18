@@ -15,12 +15,14 @@ import { Truncate } from "../tool/truncation"
 import { Database, sql } from "../storage/db"
 import { PartTable } from "../session/session.sql"
 import { SessionPrompt } from "../session/prompt"
+import { SessionActivity } from "../session/activity"
 import { Config } from "../config/config"
 
 const log = Log.create({ service: "bootstrap" })
 
 const WATCHDOG_INTERVAL = 60_000
 const MAX_RUNNING = 15 * 60 * 1_000
+const DEFAULT_IDLE = 5 * 60 * 1_000
 
 export async function InstanceBootstrap() {
   Log.Default.info("bootstrapping", { directory: Instance.directory })
@@ -33,6 +35,7 @@ export async function InstanceBootstrap() {
   Vcs.init()
   Snapshot.init()
   Truncate.init()
+  SessionActivity.init()
   cleanupOrphanedParts()
   watchdog()
 
@@ -91,7 +94,7 @@ function cleanupOrphanedParts() {
  *
  * Exported for testing.
  */
-export function watchdogTick(cutoff: number) {
+export function watchdogTick(cutoff: number, idle?: number) {
   Database.use((db) => {
     const stuck = db
       .select({
@@ -168,6 +171,28 @@ export function watchdogTick(cutoff: number) {
         )
         .run()
     }
+
+    // --- Idle detection for subagent sessions ---
+    // A session is "idle" when it has recorded activity (stream started)
+    // but nothing has happened for longer than the idle threshold.
+    // Only subagent sessions (those with a parent task tool among the
+    // stuck set) are candidates — root/interactive sessions are exempt.
+    if (idle) {
+      // Collect child session IDs referenced by stuck task tools
+      const children = new Set(stuck.filter((r) => r.tool === "task" && r.child).map((r) => r.child!))
+      for (const child of children) {
+        if (cancelled.has(child)) continue
+        if (!SessionActivity.stale(child, idle)) continue
+        const ts = SessionActivity.last(child)
+        log.warn("watchdog: idle subagent detected", {
+          sessionID: child,
+          last: ts,
+          threshold: idle,
+        })
+        cancelled.add(child)
+        SessionPrompt.cancel(child)
+      }
+    }
   })
 }
 
@@ -183,9 +208,10 @@ function watchdog() {
       const cfg = await Config.get()
       const base = cfg.experimental?.tool_timeout ?? MAX_RUNNING
       const task = cfg.experimental?.task_timeout ?? 1_800_000
+      const idle = cfg.experimental?.idle_timeout ?? DEFAULT_IDLE
       const grace = 60_000
       const max = Math.max(base, task + grace)
-      watchdogTick(Date.now() - max)
+      watchdogTick(Date.now() - max, idle)
     } catch {
       watchdogTick(Date.now() - MAX_RUNNING)
     }
