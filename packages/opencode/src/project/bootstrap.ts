@@ -21,7 +21,7 @@ import { Config } from "../config/config"
 const log = Log.create({ service: "bootstrap" })
 
 const WATCHDOG_INTERVAL = 60_000
-const MAX_RUNNING = 15 * 60 * 1_000
+const MAX_RUNNING = 45 * 60 * 1_000
 const DEFAULT_IDLE = 5 * 60 * 1_000
 
 export async function InstanceBootstrap() {
