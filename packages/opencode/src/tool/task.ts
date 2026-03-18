@@ -10,7 +10,7 @@ import { iife } from "@/util/iife"
 import { defer } from "@/util/defer"
 import { Config } from "../config/config"
 import { PermissionNext } from "@/permission/next"
-import { abortAfterAny } from "@/util/abort"
+import { abortAfterAny, raceSignal } from "@/util/abort"
 import { MCP } from "../mcp"
 
 const DEFAULT_TIMEOUT = 14_400_000 // 4 hours — zombie/stall protection, not performance pressure
@@ -218,23 +218,27 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       deadline.signal.addEventListener("abort", cancel)
 
       try {
-        const result = await SessionPrompt.prompt({
-          messageID,
-          sessionID: session.id,
-          model: {
-            modelID: model.modelID,
-            providerID: model.providerID,
-          },
-          agent: agent.name,
-          tools: {
-            todowrite: false,
-            todoread: false,
-            ...(hasTaskPermission ? {} : { task: false }),
-            ...(nested ? { question: false } : {}),
-            ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((t) => [t, false])),
-          },
-          parts: promptParts,
-        })
+        const result = await raceSignal(
+          SessionPrompt.prompt({
+            messageID,
+            sessionID: session.id,
+            model: {
+              modelID: model.modelID,
+              providerID: model.providerID,
+            },
+            agent: agent.name,
+            tools: {
+              todowrite: false,
+              todoread: false,
+              ...(hasTaskPermission ? {} : { task: false }),
+              ...(nested ? { question: false } : {}),
+              ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((t) => [t, false])),
+            },
+            parts: promptParts,
+          }),
+          deadline.signal,
+          `Task exceeded ${Math.round(ms / 1000)}s deadline`,
+        )
 
         deadline.clearTimeout()
 

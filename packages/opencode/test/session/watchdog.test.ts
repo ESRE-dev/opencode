@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, mock, test } from "bun:test"
 import { Instance } from "../../src/project/instance"
 import { Session } from "../../src/session"
 import { Identifier } from "../../src/id/id"
 import { Database, sql } from "../../src/storage/db"
 import { PartTable } from "../../src/session/session.sql"
 import { watchdogTick } from "../../src/project/bootstrap"
+import { SessionPrompt } from "../../src/session/prompt"
 import { Log } from "../../src/util/log"
 import { tmpdir } from "../fixture/fixture"
 import { resetDatabase } from "../fixture/db"
@@ -338,6 +339,151 @@ describe("watchdog: leaf-filtering", () => {
         expect(partStatus(prtB)).toBe("error")
         // Parent's task tool preserved
         expect(partStatus(prtA)).toBe("running")
+      },
+    })
+  })
+})
+
+describe("watchdog: cancel target", () => {
+  test("task tool leaf cancels child session, not parent", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const parent = await Session.create({})
+        const child = await Session.create({ parentID: parent.id })
+
+        const msg = Identifier.ascending("message")
+        const prt = Identifier.ascending("part")
+        insertMessage(msg, parent.id)
+
+        // Task tool whose child has NO stuck tools → leaf
+        insertRunning({
+          id: prt,
+          session: parent.id,
+          message: msg,
+          tool: "task",
+          start: 1000,
+          child: child.id,
+        })
+
+        const ids: string[] = []
+        const orig = SessionPrompt.cancel
+        const spy = mock((id: string) => {
+          ids.push(id)
+          // Don't call through — no real session running
+        })
+        SessionPrompt.cancel = spy as typeof SessionPrompt.cancel
+
+        try {
+          watchdogTick(Date.now())
+        } finally {
+          SessionPrompt.cancel = orig
+        }
+
+        // Watchdog should cancel the child, not the parent
+        expect(ids).toEqual([child.id])
+        expect(ids).not.toContain(parent.id)
+        // DB part still force-errored as safety net
+        expect(partStatus(prt)).toBe("error")
+      },
+    })
+  })
+
+  test("non-task leaf cancels owning session", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const ses = await Session.create({})
+        const msg = Identifier.ascending("message")
+        const prt = Identifier.ascending("part")
+        insertMessage(msg, ses.id)
+        insertRunning({ id: prt, session: ses.id, message: msg, tool: "bash", start: 1000 })
+
+        const ids: string[] = []
+        const orig = SessionPrompt.cancel
+        const spy = mock((id: string) => {
+          ids.push(id)
+        })
+        SessionPrompt.cancel = spy as typeof SessionPrompt.cancel
+
+        try {
+          watchdogTick(Date.now())
+        } finally {
+          SessionPrompt.cancel = orig
+        }
+
+        // Non-task tool: cancel the owning session directly
+        expect(ids).toEqual([ses.id])
+        expect(partStatus(prt)).toBe("error")
+      },
+    })
+  })
+
+  test("3-level chain cancels grandchild session only", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const top = await Session.create({})
+        const child = await Session.create({ parentID: top.id })
+        const grand = await Session.create({ parentID: child.id })
+
+        const topMsg = Identifier.ascending("message")
+        const childMsg = Identifier.ascending("message")
+        const grandMsg = Identifier.ascending("message")
+        const topPrt = Identifier.ascending("part")
+        const childPrt = Identifier.ascending("part")
+        const grandPrt = Identifier.ascending("part")
+
+        insertMessage(topMsg, top.id)
+        insertMessage(childMsg, child.id)
+        insertMessage(grandMsg, grand.id)
+
+        const old = 1000
+        insertRunning({
+          id: topPrt,
+          session: top.id,
+          message: topMsg,
+          tool: "task",
+          start: old,
+          child: child.id,
+        })
+        insertRunning({
+          id: childPrt,
+          session: child.id,
+          message: childMsg,
+          tool: "task",
+          start: old,
+          child: grand.id,
+        })
+        insertRunning({
+          id: grandPrt,
+          session: grand.id,
+          message: grandMsg,
+          tool: "question",
+          start: old,
+        })
+
+        const ids: string[] = []
+        const orig = SessionPrompt.cancel
+        const spy = mock((id: string) => {
+          ids.push(id)
+        })
+        SessionPrompt.cancel = spy as typeof SessionPrompt.cancel
+
+        try {
+          watchdogTick(Date.now())
+        } finally {
+          SessionPrompt.cancel = orig
+        }
+
+        // Only the grandchild's owning session should be cancelled
+        // (non-task "question" tool → cancel owning session)
+        expect(ids).toEqual([grand.id])
+        expect(ids).not.toContain(top.id)
+        expect(ids).not.toContain(child.id)
       },
     })
   })

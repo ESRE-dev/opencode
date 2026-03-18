@@ -130,13 +130,23 @@ export function watchdogTick(cutoff: number) {
 
     if (leaf.length === 0) return
 
-    // Cancel only the sessions that own leaf-level stuck tools.
-    // Parent sessions with waiting task tools keep running so
-    // their LLM can process the child error normally.
-    const sessions = [...new Set(leaf.map((r) => r.session_id))]
-    for (const id of sessions) {
-      log.warn("watchdog: cancelling stuck session", { sessionID: id })
-      SessionPrompt.cancel(id)
+    // For task-tool leaves, cancel the *child* session so the task tool's
+    // normal error-propagation path runs: child cancel → SessionPrompt.prompt()
+    // resolves → task tool returns structured TIMEOUT to the parent LLM.
+    // For non-task leaves, cancel the owning session directly.
+    const cancelled = new Set<string>()
+    for (const r of leaf) {
+      if (r.tool === "task" && r.child) {
+        if (cancelled.has(r.child)) continue
+        cancelled.add(r.child)
+        log.warn("watchdog: cancelling stuck child session", { child: r.child, parent: r.session_id })
+        SessionPrompt.cancel(r.child)
+      } else {
+        if (cancelled.has(r.session_id)) continue
+        cancelled.add(r.session_id)
+        log.warn("watchdog: cancelling stuck session", { sessionID: r.session_id })
+        SessionPrompt.cancel(r.session_id)
+      }
     }
 
     // DB update as redundant safety net — only for leaf tools
