@@ -180,8 +180,26 @@ export function watchdogTick(cutoff: number, idle?: number) {
     if (idle) {
       // Collect child session IDs referenced by stuck task tools
       const children = new Set(stuck.filter((r) => r.tool === "task" && r.child).map((r) => r.child!))
+
+      // Sessions that currently have running tools are NOT idle — the tool
+      // is doing work even though no Bus events are firing (e.g. a long
+      // bash command, a web fetch, a large file read).  Query once and
+      // build a set so we skip them cheaply.
+      const running = new Set(
+        db
+          .select({ sid: PartTable.session_id })
+          .from(PartTable)
+          .where(
+            sql`json_extract(${PartTable.data}, '$.type') = 'tool'
+                AND json_extract(${PartTable.data}, '$.state.status') = 'running'`,
+          )
+          .all()
+          .map((r) => r.sid),
+      )
+
       for (const child of children) {
         if (cancelled.has(child)) continue
+        if (running.has(child)) continue
         if (!SessionActivity.stale(child, idle)) continue
         const ts = SessionActivity.last(child)
         log.warn("watchdog: idle subagent detected", {

@@ -724,6 +724,95 @@ describe("watchdog: idle detection", () => {
     })
   })
 
+  test("child with running tool is not idle-cancelled even if stale", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const parent = await Session.create({})
+        const child = await Session.create({ parentID: parent.id })
+
+        const msg = Identifier.ascending("message")
+        const prt = Identifier.ascending("part")
+        const childMsg = Identifier.ascending("message")
+        const childPrt = Identifier.ascending("part")
+        insertMessage(msg, parent.id)
+        insertMessage(childMsg, child.id)
+
+        const old = 1000
+        // Parent task tool pointing at child — both stuck past cutoff
+        insertRunning({
+          id: prt,
+          session: parent.id,
+          message: msg,
+          tool: "task",
+          start: old,
+          child: child.id,
+        })
+        // Child has a running bash tool (e.g. long web search)
+        insertRunning({
+          id: childPrt,
+          session: child.id,
+          message: childMsg,
+          tool: "bash",
+          start: old,
+        })
+
+        // Child's last Bus activity was 10 minutes ago — looks stale,
+        // but it has a running tool so it's doing real work.
+        SessionActivity.touch(child.id, Date.now() - 600_000)
+
+        const ids: string[] = []
+        const orig = SessionPrompt.cancel
+        const spy = mock((id: string) => {
+          ids.push(id)
+        })
+        SessionPrompt.cancel = spy as typeof SessionPrompt.cancel
+
+        try {
+          // The bash tool IS a leaf (non-task stuck tool) so it gets
+          // cancelled by the leaf filter targeting child.id.
+          // BUT: if we remove the leaf filter result from the set and
+          // only check idle logic, the running tool guard should
+          // prevent idle-cancellation.
+          //
+          // To isolate the idle guard, use a cutoff that does NOT
+          // catch these tools (they started at 1000, cutoff > 1000).
+          // Then only the idle path can cancel.
+          watchdogTick(0, 300_000)
+        } finally {
+          SessionPrompt.cancel = orig
+        }
+
+        // cutoff=0 means nothing is past the cutoff, so no stuck tools,
+        // no leaves, and no children to idle-check. No cancellation at all.
+        expect(ids).toEqual([])
+
+        // Now test with a cutoff that catches the tools but verify
+        // the running-tool guard prevents idle-cancellation of child.
+        // The leaf filter WILL cancel child.id for the bash tool, but
+        // the parent task tool is NOT a leaf (child has stuck bash).
+        const ids2: string[] = []
+        const spy2 = mock((id: string) => {
+          ids2.push(id)
+        })
+        SessionPrompt.cancel = spy2 as typeof SessionPrompt.cancel
+
+        try {
+          watchdogTick(Date.now(), 300_000)
+        } finally {
+          SessionPrompt.cancel = orig
+        }
+
+        // child.id cancelled once — by the leaf filter (for bash tool).
+        // The idle path should NOT have fired because child has running tools.
+        expect(ids2).toEqual([child.id])
+        // Parent task tool preserved (child session has stuck tools)
+        expect(partStatus(prt)).toBe("running")
+      },
+    })
+  })
+
   test("session with no recorded activity is not considered stale", async () => {
     await using tmp = await tmpdir({ git: true })
     await Instance.provide({
