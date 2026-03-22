@@ -310,7 +310,7 @@ export namespace Session {
         updated: Date.now(),
       },
     }
-    process.env.OPENCODE_SESSION_ID = result.id
+    if (!result.parentID) process.env.OPENCODE_SESSION_ID = result.id
     log.info("created", result)
     Database.use((db) => {
       db.insert(SessionTable).values(toRow(result)).run()
