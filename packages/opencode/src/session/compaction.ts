@@ -14,6 +14,7 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
+import { Todo } from "./todo"
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
@@ -28,6 +29,12 @@ export namespace SessionCompaction {
   }
 
   const COMPACTION_BUFFER = 20_000
+
+  export function formatTodos(todos: Todo.Info[]): string | undefined {
+    if (todos.length === 0) return undefined
+    const items = todos.map((t) => `- [${t.status}] (${t.priority}) ${t.content}`).join("\n")
+    return `\n\n## Current Task List\nThe agent is tracking the following tasks (persisted in the database — these survive compaction):\n${items}`
+  }
 
   export async function isOverflow(input: { tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
     const config = await Config.get()
@@ -170,7 +177,7 @@ export namespace SessionCompaction {
       { sessionID: input.sessionID, agent: userMessage.agent },
       { context: [], prompt: undefined },
     )
-    const defaultPrompt = `Provide a detailed prompt for continuing our conversation above.
+    let defaultPrompt = `Provide a detailed prompt for continuing our conversation above.
 Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do next.
 The summary that you construct will be used so that another agent can read it and continue the work.
 
@@ -201,6 +208,12 @@ When constructing the summary, try to stick to this template:
 
 [Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the path to the directory.]
 ---`
+
+    const todos = Todo.get(input.sessionID)
+    const section = formatTodos(todos)
+    if (section) {
+      defaultPrompt += section
+    }
 
     // Resolve the source agent to preserve its identity during compaction
     const source = await Agent.get(userMessage.agent)
