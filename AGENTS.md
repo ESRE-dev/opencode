@@ -1,5 +1,5 @@
 - To regenerate the JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
-- To build a local dev binary and sign it for macOS, see `CUSTOM-BUILD.md` in the repo root.
+- To build a local dev binary and sign it for macOS, see `CUSTOM-BUILD.md` in the repo root. After copying the binary to `~/.opencode/bin/opencode`, you MUST ad-hoc sign it or macOS will SIGKILL it on launch (exit 137, `Killed: 9`): `xattr -d com.apple.provenance ~/.opencode/bin/opencode 2>/dev/null; codesign --force --sign - ~/.opencode/bin/opencode`
 - ALWAYS USE PARALLEL TOOLS WHEN APPLICABLE.
 - The default branch in this repo is `dev`.
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
