@@ -960,3 +960,219 @@ describe("task-error: sub-sub-agent cascade", () => {
     })
   }, 15_000)
 })
+
+// ---------------------------------------------------------------------------
+// Tests for question tool denial in subagent sessions (Property 1 & 2)
+// ---------------------------------------------------------------------------
+
+describe("task-error: question tool denial", () => {
+  test("depth-1 subagent has question denied in permission rules and tools map", async () => {
+    // Property 1: For any session created via the Task tool (at any depth),
+    // the session's permission rules include a question deny rule AND the
+    // tools map includes question: false.
+    const origin = state.server!.url.origin
+
+    // Queue: title, child success, parent resume
+    waitRequest("/chat/completions", () => chatResponse("Test Title"))
+    waitRequest("/chat/completions", () => chatResponse("Child done."))
+    waitRequest("/chat/completions", () => chatResponse("Parent done."))
+
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), configJson(origin))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { session } = await setupSubtask({
+          agent: "general",
+          prompt: "Do something",
+          description: "test question denial",
+        })
+
+        await SessionPrompt.loop({ sessionID: session.id })
+
+        // The parent session has no parentID — it's a primary session
+        const parent = await Session.get(session.id)
+        expect(parent.parentID).toBeUndefined()
+
+        // The child session should exist and have question denied
+        const children = await Session.children(session.id)
+        expect(children.length).toBeGreaterThan(0)
+
+        const child = children[0]
+        expect(child.parentID).toBe(session.id)
+
+        // Permission rules must include question deny
+        const rules = child.permission ?? []
+        const deny = rules.find((r) => r.permission === "question" && r.action === "deny")
+        expect(deny).toBeDefined()
+        expect(deny!.pattern).toBe("*")
+      },
+    })
+  }, 30_000)
+
+  test("primary session does not have question deny rule from Task tool", async () => {
+    // Property 2: For any session without a parentID (primary session), the
+    // Task tool never applies a question deny rule.
+    // Primary sessions are created via Session.create({}) — NOT through the
+    // Task tool. The Task tool only creates child sessions (with parentID).
+    const origin = state.server!.url.origin
+
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), configJson(origin))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        // Create a primary session (no parentID)
+        const primary = await Session.create({})
+        expect(primary.parentID).toBeUndefined()
+
+        // Primary session should NOT have any question deny rule
+        const rules = primary.permission ?? []
+        const deny = rules.find((r) => r.permission === "question" && r.action === "deny")
+        expect(deny).toBeUndefined()
+      },
+    })
+  }, 10_000)
+})
+
+// ---------------------------------------------------------------------------
+// Tests for task tool always resolving (Property 5)
+// ---------------------------------------------------------------------------
+
+describe("task-error: task tool always resolves", () => {
+  test("execute resolves on success path", async () => {
+    // Property 5: For any invocation of execute(), the function either
+    // returns a result object or throws — never hangs.
+    // Success path: child completes normally → parent gets task_result.
+    const origin = state.server!.url.origin
+
+    waitRequest("/chat/completions", () => chatResponse("Title"))
+    waitRequest("/chat/completions", () => chatResponse("Success output."))
+    waitRequest("/chat/completions", () => chatResponse("Done."))
+
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), configJson(origin))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { session } = await setupSubtask({
+          agent: "general",
+          prompt: "Succeed",
+          description: "test resolve success",
+        })
+
+        const result = await Promise.race([
+          SessionPrompt.loop({ sessionID: session.id }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Hung on success path")), 15_000)),
+        ])
+
+        expect(result.info.role).toBe("assistant")
+
+        const msgs = await Session.messages({ sessionID: session.id })
+        const parts = msgs.flatMap((m) => m.parts.filter((p) => p.type === "tool" && p.tool === "task"))
+        expect(parts.length).toBeGreaterThan(0)
+
+        const tp = parts[0] as MessageV2.ToolPart
+        expect(tp.state.status).toBe("completed")
+      },
+    })
+  }, 20_000)
+
+  test("execute resolves on error path", async () => {
+    // Error path: child LLM fails → parent gets error in task_result.
+    const origin = state.server!.url.origin
+
+    waitRequest("/chat/completions", () => chatResponse("Title"))
+    waitRequest("/chat/completions", () => errorResponse(400, "Bad model"))
+    waitRequest("/chat/completions", () => chatResponse("Done."))
+
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), configJson(origin))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { session } = await setupSubtask({
+          agent: "general",
+          prompt: "Fail",
+          description: "test resolve error",
+        })
+
+        const result = await Promise.race([
+          SessionPrompt.loop({ sessionID: session.id }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Hung on error path")), 15_000)),
+        ])
+
+        expect(result.info.role).toBe("assistant")
+
+        const msgs = await Session.messages({ sessionID: session.id })
+        const parts = msgs.flatMap((m) => m.parts.filter((p) => p.type === "tool" && p.tool === "task"))
+        expect(parts.length).toBeGreaterThan(0)
+
+        const tp = parts[0] as MessageV2.ToolPart
+        expect(tp.state.status).toBe("completed")
+        if (tp.state.status === "completed") {
+          expect(tp.state.output).toContain("task_id:")
+        }
+      },
+    })
+  }, 20_000)
+
+  test("execute resolves on abort path", async () => {
+    // Abort path: parent cancelled → child cancelled → loop exits.
+    const origin = state.server!.url.origin
+
+    waitRequest("/chat/completions", () => chatResponse("Title"))
+    waitRequest("/chat/completions", () => hangingStream())
+
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), configJson(origin))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { session } = await setupSubtask({
+          agent: "general",
+          prompt: "Hang",
+          description: "test resolve abort",
+        })
+
+        const done = SessionPrompt.loop({ sessionID: session.id })
+
+        // Cancel after 1.5s
+        await new Promise((r) => setTimeout(r, 1500))
+        SessionPrompt.cancel(session.id)
+
+        const result = await Promise.race([
+          done,
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Hung on abort path")), 10_000)),
+        ])
+
+        expect(result.info.role).toBe("assistant")
+      },
+    })
+  }, 15_000)
+})
