@@ -35,14 +35,25 @@ const parameters = z.object({
     ),
 })
 
-async function childText(
+export async function childText(
   result: Awaited<ReturnType<typeof SessionPrompt.prompt>>,
   id: string,
-  opts?: { skipAbort?: boolean },
+  opts?: { skipAbort?: boolean; parentAborted?: boolean; deadlineAborted?: boolean },
 ) {
   if (result.info.role !== "assistant") return ""
   const error = result.info.error
-  if (error?.name === "MessageAbortedError" && !opts?.skipAbort) return "Task was cancelled by user."
+  if (error?.name === "MessageAbortedError" && !opts?.skipAbort) {
+    if (opts?.deadlineAborted) return ""
+    if (opts?.parentAborted) return "Task was cancelled by user."
+    return [
+      `WATCHDOG: Subagent session (${id}) was killed — tool execution exceeded maximum allowed duration.`,
+      `task_id: ${id}`,
+      "",
+      "The subagent stalled (likely waiting on an external resource or internal deadlock).",
+      "Recommended: retry this task with a simpler or more focused prompt.",
+      "You can resume by passing the task_id above.",
+    ].join("\n")
+  }
   const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
   if (text) return text
   if (!error) return ""
@@ -246,7 +257,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
             "",
             ...(partial ? ["Partial output recovered from the timed-out session:", "", partial, ""] : []),
             "You can resume this task by passing the task_id above.",
-            "Recommended: retry up to 5 times before giving up.",
+            "Recommended: retry with a simpler or more focused prompt. Break large tasks into smaller sub-tasks.",
           ].join("\n")
           return {
             title: params.description,
@@ -258,7 +269,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           }
         }
 
-        const text = await childText(result, session.id)
+        const text = await childText(result, session.id, {
+          parentAborted: ctx.abort.aborted,
+          deadlineAborted: deadline.signal.aborted,
+        })
 
         const output = [
           `task_id: ${session.id} (for resuming to continue this task if needed)`,
@@ -295,7 +309,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
               "",
               "You can resume this task by passing the task_id above.",
               "If this task is important, retry with a longer timeout or a simpler prompt.",
-              "Recommended: retry up to 5 times before giving up.",
+              "Recommended: retry with a simpler or more focused prompt. Break large tasks into smaller sub-tasks.",
             ].join("\n"),
           }
         }

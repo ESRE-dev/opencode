@@ -7,6 +7,7 @@ import { Session } from "../../src/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { Identifier } from "../../src/id/id"
 import { tmpdir } from "../fixture/fixture"
+import { childText } from "../../src/tool/task"
 
 /**
  * Tests that verify error propagation in the TaskTool / subagent system.
@@ -1172,6 +1173,100 @@ describe("task-error: task tool always resolves", () => {
         ])
 
         expect(result.info.role).toBe("assistant")
+      },
+    })
+  }, 15_000)
+})
+
+// ---------------------------------------------------------------------------
+// Tests for childText error message distinction (Property 3 & 4)
+// ---------------------------------------------------------------------------
+
+describe("task-error: childText error message distinction", () => {
+  test("watchdog kill returns WATCHDOG message with session id and retry guidance", async () => {
+    const id = "test-session-123"
+    const result = {
+      info: { role: "assistant", error: { name: "MessageAbortedError" } },
+      parts: [],
+    } as unknown as Parameters<typeof childText>[0]
+
+    const text = await childText(result, id, { parentAborted: false, deadlineAborted: false })
+
+    expect(text).toContain("WATCHDOG")
+    expect(text).toContain(id)
+    expect(text).toContain("maximum allowed duration")
+    expect(text).toContain("retry this task with a simpler or more focused prompt")
+    expect(text).toContain("task_id:")
+  })
+
+  test("parent abort returns cancelled by user message", async () => {
+    const id = "test-session-456"
+    const result = {
+      info: { role: "assistant", error: { name: "MessageAbortedError" } },
+      parts: [],
+    } as unknown as Parameters<typeof childText>[0]
+
+    const text = await childText(result, id, { parentAborted: true })
+
+    expect(text).toBe("Task was cancelled by user.")
+  })
+
+  test("deadline abort returns empty string", async () => {
+    const id = "test-session-789"
+    const result = {
+      info: { role: "assistant", error: { name: "MessageAbortedError" } },
+      parts: [],
+    } as unknown as Parameters<typeof childText>[0]
+
+    const text = await childText(result, id, { deadlineAborted: true })
+
+    expect(text).toBe("")
+  })
+
+  test("deadline timeout messages contain improved nudge text", async () => {
+    const origin = state.server!.url.origin
+
+    // Title for parent session
+    waitRequest("/chat/completions", () => chatResponse("Test Title"))
+    // Child gets a hanging stream — never completes
+    waitRequest("/chat/completions", () => hangingStream())
+    // Parent resume after child timeout
+    waitRequest("/chat/completions", () => chatResponse("Done."))
+
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), configWithTimeout(origin, 3000))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { session } = await setupSubtask({
+          agent: "general",
+          prompt: "Do something that times out",
+          description: "test nudge text",
+        })
+
+        const result = await SessionPrompt.loop({ sessionID: session.id })
+
+        expect(result.info.role).toBe("assistant")
+
+        const msgs = await Session.messages({ sessionID: session.id })
+        const taskParts = msgs.flatMap((m) => m.parts.filter((p) => p.type === "tool" && p.tool === "task"))
+        expect(taskParts.length).toBeGreaterThan(0)
+
+        const tp = taskParts[0] as MessageV2.ToolPart
+        expect(tp.state.status).toBe("completed")
+
+        if (tp.state.status === "completed") {
+          const output = tp.state.output as string
+          expect(output).toContain("TIMEOUT:")
+          expect(output).toContain("retry with a simpler or more focused prompt")
+          expect(output).toContain("Break large tasks into smaller sub-tasks")
+          expect(output).not.toContain("retry up to 5 times")
+        }
       },
     })
   }, 15_000)
