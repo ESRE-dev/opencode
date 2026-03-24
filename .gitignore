@@ -32,3 +32,6 @@ tsconfig.tsbuildinfo
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Scratch investigation notes
+scratch/
