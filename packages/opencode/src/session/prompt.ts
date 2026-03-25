@@ -74,6 +74,7 @@ export namespace SessionPrompt {
             resolve(input: MessageV2.WithParts): void
             reject(reason?: any): void
           }[]
+          generation: number
         }
       > = {}
       return data
@@ -84,6 +85,16 @@ export namespace SessionPrompt {
       }
     },
   )
+
+  let gen = 0
+  const precancelled = new Map<string, number>()
+
+  export const SessionCancelledError = NamedError.create("SessionCancelledError", z.object({ sessionID: z.string() }))
+
+  /** @internal Exported for testing */
+  export const _state = state
+  /** @internal Exported for testing */
+  export const _precancelled = precancelled
 
   export function assertNotBusy(sessionID: string) {
     const match = state()[sessionID]
@@ -237,13 +248,20 @@ export namespace SessionPrompt {
     return parts
   }
 
-  function start(sessionID: string) {
+  /** @internal Exported for testing */
+  export function start(sessionID: string) {
     const s = state()
     if (s[sessionID]) return
+    if (precancelled.has(sessionID)) {
+      precancelled.delete(sessionID)
+      return
+    }
     const controller = new AbortController()
+    gen++
     s[sessionID] = {
       abort: controller,
       callbacks: [],
+      generation: gen,
     }
     return controller.signal
   }
@@ -255,23 +273,25 @@ export namespace SessionPrompt {
     return s[sessionID].abort.signal
   }
 
-  export function cancel(sessionID: string) {
-    log.info("cancel", { sessionID })
+  export function cancel(sessionID: string, generation?: number) {
+    log.info("cancel", { sessionID, generation })
     const s = state()
     const match = s[sessionID]
-    if (!match) {
-      SessionStatus.set(sessionID, { type: "idle" })
+    if (match) {
+      if (generation !== undefined && generation !== match.generation) return
+      for (const cb of match.callbacks) cb.reject(new SessionCancelledError({ sessionID }))
+      match.abort.abort()
       SessionActivity.remove(sessionID)
+      delete s[sessionID]
+      // Reject any pending permission/question promises so tool calls unblock
+      PermissionNext.rejectSession(sessionID).catch(() => {})
+      Question.rejectSession(sessionID).catch(() => {})
+      SessionStatus.set(sessionID, { type: "idle" })
       return
     }
-    match.abort.abort()
-    delete s[sessionID]
-    // Reject any pending permission/question promises so tool calls unblock
-    PermissionNext.rejectSession(sessionID).catch(() => {})
-    Question.rejectSession(sessionID).catch(() => {})
-    SessionActivity.remove(sessionID)
+    if (generation !== undefined) return
+    precancelled.set(sessionID, Date.now())
     SessionStatus.set(sessionID, { type: "idle" })
-    return
   }
 
   export const LoopInput = z.object({
@@ -283,13 +303,15 @@ export namespace SessionPrompt {
 
     const abort = resume_existing ? resume(sessionID) : start(sessionID)
     if (!abort) {
+      const entry = state()[sessionID]
+      if (!entry) throw new SessionCancelledError({ sessionID })
       return new Promise<MessageV2.WithParts>((resolve, reject) => {
-        const callbacks = state()[sessionID].callbacks
-        callbacks.push({ resolve, reject })
+        entry.callbacks.push({ resolve, reject })
       })
     }
 
-    using _ = defer(() => cancel(sessionID))
+    const g = state()[sessionID].generation
+    using _ = defer(() => cancel(sessionID, g))
 
     // Structured output state
     // Note: On session resumption, state is reset but outputFormat is preserved
