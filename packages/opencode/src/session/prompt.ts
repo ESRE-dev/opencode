@@ -99,7 +99,7 @@ export namespace SessionPrompt {
   /**
    * Subscribe to Bus events for cancel propagation.
    * Called once during bootstrap alongside SessionActivity.init().
-   * Stub — will be filled in by bead .5 (processor cancel propagation).
+   * Bridges SessionProcessor.Event.CancelRequested → SessionPrompt.cancel().
    */
   export function init() {
     log.info("init")

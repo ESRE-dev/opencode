@@ -71,6 +71,30 @@ export namespace SessionProcessor {
     let attempt = 0
     let needsCompaction = false
 
+    /** Mark any non-terminal tool parts as "error" and abort child sessions. */
+    async function sweep() {
+      const parts = await MessageV2.parts(input.assistantMessage.id)
+      for (const part of parts) {
+        if (part.type === "tool" && part.state.status !== "completed" && part.state.status !== "error") {
+          if (part.tool === "task" && part.state.status === "running" && part.state.metadata?.sessionId) {
+            await abortChildren(part.state.metadata.sessionId)
+          }
+          await Session.updatePart({
+            ...part,
+            state: {
+              ...part.state,
+              status: "error",
+              error: "Tool execution aborted",
+              time: {
+                start: part.state.status === "running" ? part.state.time.start : Date.now(),
+                end: Date.now(),
+              },
+            },
+          })
+        }
+      }
+    }
+
     const result = {
       get message() {
         return input.assistantMessage
@@ -427,6 +451,7 @@ export namespace SessionProcessor {
                 })
                 await SessionRetry.sleep(delay, input.abort).catch(() => {})
                 if (input.abort.aborted) break
+                await sweep()
                 continue
               }
               if (retry !== undefined && attempt >= MAX_RETRIES) {
@@ -448,26 +473,7 @@ export namespace SessionProcessor {
           // Cleanup sweep FIRST — mark any stuck tool parts as "error" before
           // the (potentially slow) snapshot patch.  This ensures parent sessions
           // see child tool parts in a terminal state promptly after abort.
-          const sweep = await MessageV2.parts(input.assistantMessage.id)
-          for (const part of sweep) {
-            if (part.type === "tool" && part.state.status !== "completed" && part.state.status !== "error") {
-              if (part.tool === "task" && part.state.status === "running" && part.state.metadata?.sessionId) {
-                await abortChildren(part.state.metadata.sessionId)
-              }
-              await Session.updatePart({
-                ...part,
-                state: {
-                  ...part.state,
-                  status: "error",
-                  error: "Tool execution aborted",
-                  time: {
-                    start: part.state.status === "running" ? part.state.time.start : Date.now(),
-                    end: Date.now(),
-                  },
-                },
-              })
-            }
-          }
+          await sweep()
           if (snapshot) {
             try {
               const patch = await Snapshot.patch(snapshot)

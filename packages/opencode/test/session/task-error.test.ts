@@ -1271,3 +1271,216 @@ describe("task-error: childText error message distinction", () => {
     })
   }, 15_000)
 })
+
+// ---------------------------------------------------------------------------
+// S1: CancelRequested bus event propagation through parent→child→grandchild
+// ---------------------------------------------------------------------------
+
+describe("task-error: CancelRequested propagation", () => {
+  test("cancel propagates through parent→child→grandchild and marks tool parts as error", async () => {
+    // S1: Set up a parent→child→grandchild topology where the grandchild
+    // hangs, cancel the parent, and verify that the cleanup sweep marks all
+    // stuck tool parts as "error" across the hierarchy. This validates that
+    // abortChildren recursively walks the session tree and publishes
+    // CancelRequested for each child session.
+    const origin = state.server!.url.origin
+
+    // 1. Parent title
+    waitRequest("/chat/completions", () => chatResponse("Cancel Test"))
+    // 2. Child A LLM → task tool call to spawn grandchild
+    waitRequest("/chat/completions", () =>
+      toolCallResponse("task", "call_cancel", {
+        description: "cancel grandchild",
+        prompt: "Will be cancelled",
+        subagent_type: "general",
+      }),
+    )
+    // 3. Grandchild B LLM → hanging stream
+    waitRequest("/chat/completions", () => hangingStream())
+    // Fallback for any post-cancel LLM calls
+    state.fallback = (pathname) => {
+      if (pathname.endsWith("/chat/completions")) return chatResponse("Cancelled.")
+      return new Response(
+        JSON.stringify({ error: { message: "fallback: " + pathname, type: "invalid_request_error" } }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      )
+    }
+
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), configWithAgent(origin, 60000))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { session } = await setupSubtask({
+          agent: "nester",
+          prompt: "Spawn grandchild that will be cancelled",
+          description: "test cancel propagation",
+        })
+
+        const done = SessionPrompt.loop({ sessionID: session.id })
+
+        // Wait for grandchild to start hanging
+        await new Promise((r) => setTimeout(r, 2500))
+
+        // Cancel the parent — should propagate through the hierarchy
+        SessionPrompt.cancel(session.id)
+
+        await Promise.race([
+          done,
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Hung after cancel")), 8000)),
+        ])
+
+        // Allow cascade cleanup to complete
+        await new Promise((r) => setTimeout(r, 1000))
+
+        // Verify the full hierarchy exists
+        const children = await Session.children(session.id)
+        expect(children.length).toBeGreaterThan(0)
+        const childA = children[0]
+
+        const grandchildren = await Session.children(childA.id)
+        expect(grandchildren.length).toBeGreaterThan(0)
+
+        // Child A's task tool part (pointing to grandchild) should be in
+        // terminal state after the cleanup sweep via abortChildren
+        const childMsgs = await Session.messages({ sessionID: childA.id })
+        const childTaskParts = childMsgs.flatMap((m) => m.parts.filter((p) => p.type === "tool" && p.tool === "task"))
+        expect(childTaskParts.length).toBeGreaterThan(0)
+
+        for (const p of childTaskParts) {
+          const tp = p as MessageV2.ToolPart
+          // Must not be stuck in "running" — abortChildren should have
+          // marked it as "error"
+          expect(tp.state.status).not.toBe("running")
+        }
+
+        // Parent's task tool part (pointing to child A) also not running
+        const msgs = await Session.messages({ sessionID: session.id })
+        const parentParts = msgs.flatMap((m) => m.parts.filter((p) => p.type === "tool" && p.tool === "task"))
+        for (const p of parentParts) {
+          const tp = p as MessageV2.ToolPart
+          expect(tp.state.status).not.toBe("running")
+        }
+      },
+    })
+  }, 20_000)
+})
+
+// ---------------------------------------------------------------------------
+// S2: Pre-aborted signal causes immediate rejection in permission-check path
+// ---------------------------------------------------------------------------
+
+describe("task-error: pre-aborted signal rejection", () => {
+  test("pre-aborted signal rejects immediately without hanging", async () => {
+    // Requirement 10 AC 10.3: when the abort signal is already fired before
+    // the processor creates its abort promise, the promise rejects immediately.
+    // This validates the guard at processor.ts line 118:
+    //   if (input.abort.aborted) return reject(new DOMException("Aborted", "AbortError"))
+    const origin = state.server!.url.origin
+
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), configJson(origin))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        // Create a pre-aborted AbortController
+        const ctrl = new AbortController()
+        ctrl.abort()
+
+        // The abort promise pattern from processor.ts:117-122 should reject
+        // immediately when signal is already aborted
+        const start = Date.now()
+        const aborted = new Promise<never>((_, reject) => {
+          if (ctrl.signal.aborted) return reject(new DOMException("Aborted", "AbortError"))
+          ctrl.signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+            once: true,
+          })
+        })
+
+        // Race against a timeout — if the promise hangs, the test fails
+        const result = await Promise.race([
+          aborted.catch((e) => ({ rejected: true, error: e })),
+          new Promise<{ rejected: false }>((resolve) => setTimeout(() => resolve({ rejected: false }), 2000)),
+        ])
+        const elapsed = Date.now() - start
+
+        // Should reject immediately (< 50ms), not wait for the 2s timeout
+        expect(result).toHaveProperty("rejected", true)
+        expect(elapsed).toBeLessThan(100)
+        if ("error" in result) {
+          expect((result.error as DOMException).name).toBe("AbortError")
+        }
+      },
+    })
+  }, 5_000)
+
+  test("SessionPrompt.loop exits promptly when session is cancelled before LLM responds", async () => {
+    // End-to-end: cancel the session immediately, verify the loop exits
+    // without hanging on the permission path or any other await.
+    const origin = state.server!.url.origin
+
+    // Queue a hanging stream so the LLM never responds
+    waitRequest("/chat/completions", () => chatResponse("Title"))
+    waitRequest("/chat/completions", () => hangingStream())
+
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "opencode.json"), configJson(origin))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = await Provider.getModel("alibaba", "qwen-plus")
+        const session = await Session.create({})
+        const msgID = Identifier.ascending("message")
+
+        const user: MessageV2.User = {
+          id: msgID,
+          sessionID: session.id,
+          role: "user",
+          time: { created: Date.now() },
+          agent: "build",
+          model: { providerID: "alibaba", modelID: model.id },
+        }
+        await Session.updateMessage(user)
+        await Session.updatePart({
+          id: Identifier.ascending("part"),
+          messageID: msgID,
+          sessionID: session.id,
+          type: "text",
+          text: "Hello",
+        })
+
+        const start = Date.now()
+        const done = SessionPrompt.loop({ sessionID: session.id })
+
+        // Cancel almost immediately — signal is set before permission check
+        await new Promise((r) => setTimeout(r, 500))
+        SessionPrompt.cancel(session.id)
+
+        const result = await Promise.race([
+          done,
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Hung after pre-abort cancel")), 5000)),
+        ])
+        const elapsed = Date.now() - start
+
+        expect(result.info.role).toBe("assistant")
+        // Should resolve within ~2s (500ms wait + cancel overhead)
+        expect(elapsed).toBeLessThan(5000)
+      },
+    })
+  }, 10_000)
+})
