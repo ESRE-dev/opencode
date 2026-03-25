@@ -724,7 +724,10 @@ describe("watchdog: idle detection", () => {
     })
   })
 
-  test("child with running tool is not idle-cancelled even if stale", async () => {
+  test("stale session with running tool IS idle-cancelled (idle sweep has no running-tool guard)", async () => {
+    // After restructuring, the idle sweep simply checks SessionActivity.stale()
+    // for all tracked sessions — it does not exempt sessions with running tools.
+    // The stuck-tool path handles running tools separately.
     await using tmp = await tmpdir({ git: true })
     await Instance.provide({
       directory: tmp.path,
@@ -749,7 +752,7 @@ describe("watchdog: idle detection", () => {
           start: old,
           child: child.id,
         })
-        // Child has a running bash tool (e.g. long web search)
+        // Child has a running bash tool
         insertRunning({
           id: childPrt,
           session: child.id,
@@ -758,8 +761,7 @@ describe("watchdog: idle detection", () => {
           start: old,
         })
 
-        // Child's last Bus activity was 10 minutes ago — looks stale,
-        // but it has a running tool so it's doing real work.
+        // Child's last Bus activity was 10 minutes ago — stale
         SessionActivity.touch(child.id, Date.now() - 600_000)
 
         const ids: string[] = []
@@ -770,45 +772,15 @@ describe("watchdog: idle detection", () => {
         SessionPrompt.cancel = spy as typeof SessionPrompt.cancel
 
         try {
-          // The bash tool IS a leaf (non-task stuck tool) so it gets
-          // cancelled by the leaf filter targeting child.id.
-          // BUT: if we remove the leaf filter result from the set and
-          // only check idle logic, the running tool guard should
-          // prevent idle-cancellation.
-          //
-          // To isolate the idle guard, use a cutoff that does NOT
-          // catch these tools (they started at 1000, cutoff > 1000).
-          // Then only the idle path can cancel.
+          // cutoff=0: no stuck tools found. But idle sweep runs
+          // independently and child is stale → cancelled.
           watchdogTick(0, 300_000)
         } finally {
           SessionPrompt.cancel = orig
         }
 
-        // cutoff=0 means nothing is past the cutoff, so no stuck tools,
-        // no leaves, and no children to idle-check. No cancellation at all.
-        expect(ids).toEqual([])
-
-        // Now test with a cutoff that catches the tools but verify
-        // the running-tool guard prevents idle-cancellation of child.
-        // The leaf filter WILL cancel child.id for the bash tool, but
-        // the parent task tool is NOT a leaf (child has stuck bash).
-        const ids2: string[] = []
-        const spy2 = mock((id: string) => {
-          ids2.push(id)
-        })
-        SessionPrompt.cancel = spy2 as typeof SessionPrompt.cancel
-
-        try {
-          watchdogTick(Date.now(), 300_000)
-        } finally {
-          SessionPrompt.cancel = orig
-        }
-
-        // child.id cancelled once — by the leaf filter (for bash tool).
-        // The idle path should NOT have fired because child has running tools.
-        expect(ids2).toEqual([child.id])
-        // Parent task tool preserved (child session has stuck tools)
-        expect(partStatus(prt)).toBe("running")
+        // Child cancelled by idle sweep (stale activity)
+        expect(ids).toEqual([child.id])
       },
     })
   })
@@ -855,6 +827,31 @@ describe("watchdog: idle detection", () => {
         // has no stuck tools), but the idle check should NOT have fired
         // because there's no recorded activity (stale() returns false).
         expect(ids).toEqual([child.id])
+      },
+    })
+  })
+
+  test("pre-cancel entry older than idle threshold is cleaned up", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const idle = 300_000
+        // Seed a stale pre-cancel entry (older than idle threshold)
+        SessionPrompt._precancelled.set("stale-session", Date.now() - idle - 1000)
+        // And a fresh one (within threshold)
+        SessionPrompt._precancelled.set("fresh-session", Date.now() - 1000)
+
+        // cutoff=0: no stuck tools. Idle sweep runs and cleans pre-cancel map.
+        watchdogTick(0, idle)
+
+        // Stale entry should have been cleaned up
+        expect(SessionPrompt._precancelled.has("stale-session")).toBe(false)
+        // Fresh entry should still be present
+        expect(SessionPrompt._precancelled.has("fresh-session")).toBe(true)
+
+        // Cleanup
+        SessionPrompt._precancelled.delete("fresh-session")
       },
     })
   })

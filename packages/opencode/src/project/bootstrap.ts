@@ -36,6 +36,7 @@ export async function InstanceBootstrap() {
   Snapshot.init()
   Truncate.init()
   SessionActivity.init()
+  SessionPrompt.init()
   cleanupOrphanedParts()
   watchdog()
 
@@ -110,105 +111,93 @@ export function watchdogTick(cutoff: number, idle?: number) {
             AND json_extract(${PartTable.data}, '$.state.time.start') < ${cutoff}`,
       )
       .all()
-    if (stuck.length === 0) return
 
-    // Sessions that contain at least one stuck tool
-    const stuckSessions = new Set(stuck.map((r) => r.session_id))
-
-    // A task tool whose child session also has stuck tools is just
-    // waiting — it will resolve once the child is cancelled.
-    // Everything else (non-task tools, or task tools whose child has
-    // no stuck tools) is a leaf that we must force-error.
-    const leaf = stuck.filter((r) => {
-      if (r.tool !== "task") return true
-      if (!r.child) return true
-      return !stuckSessions.has(r.child)
-    })
-
-    log.warn("watchdog: found stuck tool parts", {
-      total: stuck.length,
-      leaf: leaf.length,
-      ids: stuck.map((r) => r.id),
-    })
-
-    if (leaf.length === 0) return
-
-    // For task-tool leaves, cancel the *child* session so the task tool's
-    // normal error-propagation path runs: child cancel → SessionPrompt.prompt()
-    // resolves → task tool returns structured TIMEOUT to the parent LLM.
-    // For non-task leaves, cancel the owning session directly.
     const cancelled = new Set<string>()
-    for (const r of leaf) {
-      if (r.tool === "task" && r.child) {
-        if (cancelled.has(r.child)) continue
-        cancelled.add(r.child)
-        log.warn("watchdog: cancelling stuck child session", { child: r.child, parent: r.session_id })
-        SessionPrompt.cancel(r.child)
-      } else {
-        if (cancelled.has(r.session_id)) continue
-        cancelled.add(r.session_id)
-        log.warn("watchdog: cancelling stuck session", { sessionID: r.session_id })
-        SessionPrompt.cancel(r.session_id)
+
+    if (stuck.length > 0) {
+      // Sessions that contain at least one stuck tool
+      const stuckSessions = new Set(stuck.map((r) => r.session_id))
+
+      // A task tool whose child session also has stuck tools is just
+      // waiting — it will resolve once the child is cancelled.
+      // Everything else (non-task tools, or task tools whose child has
+      // no stuck tools) is a leaf that we must force-error.
+      const leaf = stuck.filter((r) => {
+        if (r.tool !== "task") return true
+        if (!r.child) return true
+        return !stuckSessions.has(r.child)
+      })
+
+      log.warn("watchdog: found stuck tool parts", {
+        total: stuck.length,
+        leaf: leaf.length,
+        ids: stuck.map((r) => r.id),
+      })
+
+      if (leaf.length > 0) {
+        // For task-tool leaves, cancel the *child* session so the task tool's
+        // normal error-propagation path runs: child cancel → SessionPrompt.prompt()
+        // resolves → task tool returns structured TIMEOUT to the parent LLM.
+        // For non-task leaves, cancel the owning session directly.
+        for (const r of leaf) {
+          if (r.tool === "task" && r.child) {
+            if (cancelled.has(r.child)) continue
+            cancelled.add(r.child)
+            log.warn("watchdog: cancelling stuck child session", { child: r.child, parent: r.session_id })
+            SessionPrompt.cancel(r.child)
+          } else {
+            if (cancelled.has(r.session_id)) continue
+            cancelled.add(r.session_id)
+            log.warn("watchdog: cancelling stuck session", { sessionID: r.session_id })
+            SessionPrompt.cancel(r.session_id)
+          }
+        }
+
+        // DB update as redundant safety net — only for leaf tools
+        const now = Date.now()
+        for (const r of leaf) {
+          db.update(PartTable)
+            .set({
+              data: sql`json_set(
+                json_set(
+                  json_set(${PartTable.data}, '$.state.status', 'error'),
+                  '$.state.error', 'Tool execution exceeded maximum allowed duration (watchdog)'
+                ),
+                '$.state.time.end', ${now}
+              )`,
+            })
+            .where(
+              sql`${PartTable.id} = ${r.id}
+                  AND json_extract(${PartTable.data}, '$.state.status') = 'running'`,
+            )
+            .run()
+        }
       }
     }
 
-    // DB update as redundant safety net — only for leaf tools
-    const now = Date.now()
-    for (const r of leaf) {
-      db.update(PartTable)
-        .set({
-          data: sql`json_set(
-            json_set(
-              json_set(${PartTable.data}, '$.state.status', 'error'),
-              '$.state.error', 'Tool execution exceeded maximum allowed duration (watchdog)'
-            ),
-            '$.state.time.end', ${now}
-          )`,
-        })
-        .where(
-          sql`${PartTable.id} = ${r.id}
-              AND json_extract(${PartTable.data}, '$.state.status') = 'running'`,
-        )
-        .run()
-    }
-
-    // --- Idle detection for subagent sessions ---
-    // A session is "idle" when it has recorded activity (stream started)
-    // but nothing has happened for longer than the idle threshold.
-    // Only subagent sessions (those with a parent task tool among the
-    // stuck set) are candidates — root/interactive sessions are exempt.
+    // --- Independent idle detection sweep ---
+    // Runs on every tick when idle param is provided, regardless of
+    // whether any stuck tool parts were found above.
+    // Iterates ALL tracked sessions in SessionActivity, not just
+    // children of stuck task tools.
     if (idle) {
-      // Collect child session IDs referenced by stuck task tools
-      const children = new Set(stuck.filter((r) => r.tool === "task" && r.child).map((r) => r.child!))
+      // Clean up stale pre-cancel entries that were never consumed
+      const now = Date.now()
+      for (const [id, ts] of SessionPrompt._precancelled) {
+        if (now - ts > idle) SessionPrompt._precancelled.delete(id)
+      }
 
-      // Sessions that currently have running tools are NOT idle — the tool
-      // is doing work even though no Bus events are firing (e.g. a long
-      // bash command, a web fetch, a large file read).  Query once and
-      // build a set so we skip them cheaply.
-      const running = new Set(
-        db
-          .select({ sid: PartTable.session_id })
-          .from(PartTable)
-          .where(
-            sql`json_extract(${PartTable.data}, '$.type') = 'tool'
-                AND json_extract(${PartTable.data}, '$.state.status') = 'running'`,
-          )
-          .all()
-          .map((r) => r.sid),
-      )
-
-      for (const child of children) {
-        if (cancelled.has(child)) continue
-        if (running.has(child)) continue
-        if (!SessionActivity.stale(child, idle)) continue
-        const ts = SessionActivity.last(child)
-        log.warn("watchdog: idle subagent detected", {
-          sessionID: child,
+      for (const [id] of Object.entries(SessionActivity.list())) {
+        if (cancelled.has(id)) continue
+        if (!SessionActivity.stale(id, idle)) continue
+        const ts = SessionActivity.last(id)
+        log.warn("watchdog: idle session detected", {
+          sessionID: id,
           last: ts,
           threshold: idle,
         })
-        cancelled.add(child)
-        SessionPrompt.cancel(child)
+        cancelled.add(id)
+        SessionPrompt.cancel(id)
       }
     }
   })

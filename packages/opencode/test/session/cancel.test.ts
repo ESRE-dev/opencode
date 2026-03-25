@@ -1,6 +1,8 @@
 import { describe, expect, spyOn, test } from "bun:test"
+import { Bus } from "../../src/bus"
 import { Instance } from "../../src/project/instance"
 import { SessionActivity } from "../../src/session/activity"
+import { SessionProcessor } from "../../src/session/processor"
 import { SessionPrompt } from "../../src/session/prompt"
 import { SessionStatus } from "../../src/session/status"
 import { Log } from "../../src/util/log"
@@ -424,6 +426,58 @@ describe("SessionPrompt cancel", () => {
 
         // Clean up
         for (const id of ids) SessionPrompt.cancel(id)
+      },
+    })
+  })
+
+  test("Property 7: CancelRequested event triggers cancel for active session", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const id = "session_cancel_propagation"
+
+        // Wire up the subscription
+        SessionPrompt.init()
+
+        // Start a session so there's state to cancel
+        const signal = SessionPrompt.start(id)
+        expect(signal).toBeDefined()
+        expect(signal!.aborted).toBe(false)
+
+        // Publish a CancelRequested event (simulates abortChildren calling Bus.publish)
+        Bus.publish(SessionProcessor.Event.CancelRequested, { sessionID: id })
+
+        // Allow microtask for subscriber to fire
+        await new Promise((r) => setTimeout(r, 10))
+
+        // The session should now be cancelled
+        expect(signal!.aborted).toBe(true)
+        expect(SessionPrompt._state()[id]).toBeUndefined()
+      },
+    })
+  })
+
+  test("Property 7: CancelRequested event is no-op for nonexistent session", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const spy = spyOn(SessionActivity, "remove")
+        try {
+          SessionPrompt.init()
+
+          // Publish for a session that doesn't exist
+          Bus.publish(SessionProcessor.Event.CancelRequested, { sessionID: "session_nonexistent" })
+
+          await new Promise((r) => setTimeout(r, 10))
+
+          // Should not have called remove (no state to clean up)
+          const calls = spy.mock.calls.filter((c) => c[0] === "session_nonexistent")
+          expect(calls).toHaveLength(0)
+        } finally {
+          spy.mockRestore()
+        }
       },
     })
   })

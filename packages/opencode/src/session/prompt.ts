@@ -96,6 +96,16 @@ export namespace SessionPrompt {
   /** @internal Exported for testing */
   export const _precancelled = precancelled
 
+  /**
+   * Subscribe to Bus events for cancel propagation.
+   * Called once during bootstrap alongside SessionActivity.init().
+   * Stub — will be filled in by bead .5 (processor cancel propagation).
+   */
+  export function init() {
+    log.info("init")
+    Bus.subscribe(SessionProcessor.Event.CancelRequested, (evt) => cancel(evt.properties.sessionID))
+  }
+
   export function assertNotBusy(sessionID: string) {
     const match = state()[sessionID]
     if (match) throw new Session.BusyError(sessionID)
