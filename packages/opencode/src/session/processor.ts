@@ -2,6 +2,7 @@ import { Cause, Deferred, Effect, Layer, Context, Scope } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Bus } from "@/bus"
+import { BusEvent } from "@/bus/bus-event"
 import { Config } from "@/config"
 import { Permission } from "@/permission"
 import { Plugin } from "@/plugin"
@@ -10,8 +11,7 @@ import * as Session from "./session"
 import { LLM } from "./llm"
 import { MessageV2 } from "./message-v2"
 import { isOverflow } from "./overflow"
-import { PartID } from "./schema"
-import type { SessionID } from "./schema"
+import { PartID, SessionID } from "./schema"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
@@ -20,6 +20,9 @@ import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
 import { Log } from "@/util"
 import { isRecord } from "@/util/record"
+import z from "zod"
+
+export const CancelRequested = BusEvent.define("session.prompt.cancel", z.object({ sessionID: SessionID.zod }))
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
