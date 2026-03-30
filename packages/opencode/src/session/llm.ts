@@ -2,6 +2,8 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { llmClient } from "@opencode-ai/core/effect/layer-node-platform"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Provider } from "@/provider/provider"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Context, Effect, Layer } from "effect"
@@ -11,7 +13,9 @@ import type { LLMEvent } from "@opencode-ai/llm"
 import { LLMClient, RequestExecutor, WebSocketExecutor } from "@opencode-ai/llm/route"
 import type { LLMClientService } from "@opencode-ai/llm/route"
 import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
+import type { LanguageModelV3 } from "@ai-sdk/provider"
 import { ProviderTransform } from "@/provider/transform"
+import { ProviderFallback } from "@/provider/fallback"
 import { Config } from "@/config/config"
 import type { Agent } from "@/agent/agent"
 import type { MessageV2 } from "./message-v2"
@@ -19,6 +23,7 @@ import { Plugin } from "@/plugin"
 import { Permission } from "@/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
+import { TuiEvent } from "@/server/tui-event"
 import { Wildcard } from "@/util/wildcard"
 import { SessionID } from "@/session/schema"
 import { Auth } from "@/auth"
@@ -101,6 +106,26 @@ const live: Layer.Layer<
         ],
         { concurrency: "unbounded" },
       )
+
+      // Resolve fallback provider/model if configured. On a transient error
+      // the fallback middleware retries the request on this cross-provider model.
+      const fallbackTarget = ProviderFallback.resolve(input.model.providerID, input.model.id, cfg.fallback)
+      let fallback: LanguageModelV3 | undefined
+      if (fallbackTarget) {
+        const resolved = yield* provider
+          .getModel(ProviderV2.ID.make(fallbackTarget.providerID), ModelV2.ID.make(fallbackTarget.modelID))
+          .pipe(
+            Effect.flatMap((model) => provider.getLanguage(model)),
+            Effect.option,
+          )
+        if (Option.isSome(resolved)) {
+          fallback = resolved.value
+        } else {
+          yield* Effect.logWarning("fallback unavailable", {
+            target: `${fallbackTarget.providerID}/${fallbackTarget.modelID}`,
+          })
+        }
+      }
 
       const isWorkflow = language instanceof GitLabWorkflowLanguageModel
       const prepared = yield* LLMRequestPrep.prepare({
@@ -339,6 +364,21 @@ const live: Layer.Layer<
                   return args.params
                 },
               },
+              ...(fallback
+                ? [
+                    ProviderFallback.middleware(fallback, (info) =>
+                      bridge.fork(
+                        events
+                          .publish(TuiEvent.ToastShow, {
+                            title: "Provider fallback activated",
+                            message: `Switched to ${info.target}`,
+                            variant: "warning",
+                          })
+                          .pipe(Effect.ignore),
+                      ),
+                    ),
+                  ]
+                : []),
             ],
           }),
           experimental_telemetry: {
