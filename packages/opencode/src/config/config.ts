@@ -211,6 +211,12 @@ export const Info = z
           .describe("Token buffer for compaction. Leaves enough window to avoid overflow during compaction."),
       })
       .optional(),
+    fallback: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe(
+        'Provider fallback map. Key is source provider ID, value is target provider ID. E.g. { "github-copilot": "amazon-bedrock" }',
+      ),
     experimental: z
       .object({
         disable_paste_summary: z.boolean().optional(),
