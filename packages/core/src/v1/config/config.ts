@@ -163,6 +163,10 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
+  fallback: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
+    description:
+      'Provider fallback map. Key is source provider ID, value is target provider ID. E.g. { "github-copilot": "amazon-bedrock" }',
+  }),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),
