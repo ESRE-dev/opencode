@@ -9,6 +9,8 @@ import { pathToFileURL } from "url"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { AppFileSystem } from "@opencode-ai/shared/filesystem"
 
+const LSP_TIMEOUT = 10_000
+
 const operations = [
   "goToDefinition",
   "findReferences",
@@ -78,7 +80,13 @@ export const LspTool = Tool.define(
               case "outgoingCalls":
                 return lsp.outgoingCalls(position)
             }
-          })()
+          })().pipe(
+            Effect.timeoutFail({
+              duration: LSP_TIMEOUT,
+              onTimeout: () => new Error(`LSP ${args.operation} timed out after ${LSP_TIMEOUT / 1000}s`),
+            }),
+            Effect.catchTag("TimeoutException", (e) => Effect.die(e)),
+          )
 
           return {
             title,

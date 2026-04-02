@@ -1192,4 +1192,30 @@ describe("tool.bash truncation", () => {
       },
     })
   })
+
+  each("abort signal terminates process", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const controller = new AbortController()
+        const tool = await BashTool.init()
+
+        // Start a long-running sleep, then abort after 200ms
+        const start = Date.now()
+        setTimeout(() => controller.abort(), 200)
+
+        const result = await tool.execute(
+          {
+            command: "sleep 30",
+            description: "Long sleep to test abort",
+          },
+          { ...ctx, abort: controller.signal },
+        )
+
+        const elapsed = Date.now() - start
+        expect(elapsed).toBeLessThan(5000)
+        expect(result.output).toContain("aborted")
+      },
+    })
+  })
 })

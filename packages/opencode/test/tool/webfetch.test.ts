@@ -100,4 +100,118 @@ describe("tool.webfetch", () => {
       },
     )
   })
+
+  test("returns structured response on 404 instead of throwing", async () => {
+    await withFetch(
+      async () => new Response("Not Found", { status: 404, statusText: "Not Found" }),
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            const result = await webfetch.execute({ url: "https://example.com/missing", format: "text" }, ctx)
+            expect(result.output).toContain("HTTP 404")
+            expect(result.output).toContain("not found")
+            expect(result.title).toContain("HTTP 404")
+          },
+        })
+      },
+    )
+  })
+
+  test("returns structured response on 500 instead of throwing", async () => {
+    await withFetch(
+      async () => new Response("Server Error", { status: 500, statusText: "Internal Server Error" }),
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            const result = await webfetch.execute({ url: "https://example.com/error", format: "text" }, ctx)
+            expect(result.output).toContain("HTTP 500")
+            expect(result.output).toContain("server error")
+          },
+        })
+      },
+    )
+  })
+
+  test("returns structured response on 403 without cloudflare header", async () => {
+    await withFetch(
+      async () => new Response("Forbidden", { status: 403, statusText: "Forbidden" }),
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            const result = await webfetch.execute({ url: "https://example.com/secret", format: "text" }, ctx)
+            expect(result.output).toContain("HTTP 403")
+            expect(result.output).toContain("forbidden")
+          },
+        })
+      },
+    )
+  })
+
+  test("returns structured response on 429 rate limit", async () => {
+    await withFetch(
+      async () => new Response("Too Many Requests", { status: 429, statusText: "Too Many Requests" }),
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            const result = await webfetch.execute({ url: "https://example.com/limited", format: "text" }, ctx)
+            expect(result.output).toContain("HTTP 429")
+            expect(result.output).toContain("Rate limited")
+          },
+        })
+      },
+    )
+  })
+
+  test("returns hint for unknown error status", async () => {
+    await withFetch(
+      async () => new Response("Teapot", { status: 418, statusText: "I'm a Teapot" }),
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            const result = await webfetch.execute({ url: "https://example.com/teapot", format: "text" }, ctx)
+            expect(result.output).toContain("HTTP 418")
+            expect(result.output).toContain("alternative")
+          },
+        })
+      },
+    )
+  })
+
+  test("retries cloudflare 403 and returns hint if retry also fails", async () => {
+    let calls = 0
+    await withFetch(
+      async () => {
+        calls++
+        if (calls === 1) {
+          return new Response("Blocked", {
+            status: 403,
+            headers: { "cf-mitigated": "challenge" },
+          })
+        }
+        return new Response("Still Blocked", { status: 403, statusText: "Forbidden" })
+      },
+      async () => {
+        await Instance.provide({
+          directory: projectRoot,
+          fn: async () => {
+            const webfetch = await WebFetchTool.init()
+            const result = await webfetch.execute({ url: "https://example.com/cf", format: "text" }, ctx)
+            expect(calls).toBe(2)
+            expect(result.output).toContain("HTTP 403")
+            expect(result.output).toContain("forbidden")
+          },
+        })
+      },
+    )
+  })
 })
