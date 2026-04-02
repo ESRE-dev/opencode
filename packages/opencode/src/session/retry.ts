@@ -14,6 +14,9 @@ export const RETRY_BACKOFF_FACTOR = 2
 export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
 export const RETRY_MAX_DELAY = 2_147_483_647 // max 32-bit signed integer for setTimeout
 
+export const MAX_RETRIES = 12
+const COPILOT_403_MAX = 3
+
 function cap(ms: number) {
   return Math.min(ms, RETRY_MAX_DELAY)
 }
@@ -51,7 +54,8 @@ export function delay(attempt: number, error?: MessageV2.APIError) {
   return cap(Math.min(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1), RETRY_MAX_DELAY_NO_HEADERS))
 }
 
-export function retryable(error: Err) {
+export function retryable(error: Err, attempt?: number) {
+  if (attempt !== undefined && attempt >= MAX_RETRIES) return undefined
   // context overflow errors should not be retried
   if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
   if (MessageV2.APIError.isInstance(error)) {
@@ -59,6 +63,7 @@ export function retryable(error: Err) {
     // 5xx errors are transient server failures and should always be retried,
     // even when the provider SDK doesn't explicitly mark them as retryable.
     if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
+    if (status === 403 && attempt !== undefined && attempt >= COPILOT_403_MAX) return undefined
     if (error.data.responseBody?.includes("FreeUsageLimitError")) return GO_UPSELL_MESSAGE
     return error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message
   }
@@ -110,7 +115,7 @@ export function policy(opts: {
   return Schedule.fromStepWithMetadata(
     Effect.succeed((meta: Schedule.InputMetadata<unknown>) => {
       const error = opts.parse(meta.input)
-      const message = retryable(error)
+      const message = retryable(error, meta.attempt)
       if (!message) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
         const wait = delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)

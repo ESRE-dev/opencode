@@ -230,6 +230,46 @@ describe("session.retry.retryable", () => {
     expect(retryable).toBeDefined()
     expect(retryable).toBe("Response decompression failed")
   })
+
+  test("returns undefined when attempt >= MAX_RETRIES", () => {
+    const error = apiError()
+    expect(SessionRetry.retryable(error, SessionRetry.MAX_RETRIES)).toBeUndefined()
+    expect(SessionRetry.retryable(error, SessionRetry.MAX_RETRIES + 1)).toBeUndefined()
+  })
+
+  test("still retries when attempt < MAX_RETRIES", () => {
+    const error = apiError()
+    expect(SessionRetry.retryable(error, SessionRetry.MAX_RETRIES - 1)).toBeDefined()
+  })
+
+  test("returns undefined for Copilot 403 when attempt >= 3", () => {
+    const error = new MessageV2.APIError({
+      message: "Forbidden",
+      isRetryable: true,
+      statusCode: 403,
+    }).toObject() as MessageV2.APIError
+    expect(SessionRetry.retryable(error, 3)).toBeUndefined()
+    expect(SessionRetry.retryable(error, 4)).toBeUndefined()
+  })
+
+  test("retries Copilot 403 when attempt < 3", () => {
+    const error = new MessageV2.APIError({
+      message: "Forbidden",
+      isRetryable: true,
+      statusCode: 403,
+    }).toObject() as MessageV2.APIError
+    expect(SessionRetry.retryable(error, 0)).toBe("Forbidden")
+    expect(SessionRetry.retryable(error, 2)).toBe("Forbidden")
+  })
+
+  test("retries 403 without attempt parameter", () => {
+    const error = new MessageV2.APIError({
+      message: "Forbidden",
+      isRetryable: true,
+      statusCode: 403,
+    }).toObject() as MessageV2.APIError
+    expect(SessionRetry.retryable(error)).toBe("Forbidden")
+  })
 })
 
 describe("session.message-v2.fromError", () => {
