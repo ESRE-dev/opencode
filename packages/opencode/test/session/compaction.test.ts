@@ -1195,6 +1195,322 @@ describe("session.compaction.process", () => {
       },
     })
   })
+
+  test("caps agent prompt at 4000 characters in system messages", async () => {
+    const captured: string[][] = []
+    const capLayer = Layer.succeed(
+      SessionProcessorModule.SessionProcessor.Service,
+      SessionProcessorModule.SessionProcessor.Service.of({
+        create: Effect.fn("TestSessionProcessor.create")((input) => {
+          const msg = input.assistantMessage
+          return Effect.succeed({
+            get message() {
+              return msg
+            },
+            abort: Effect.fn("TestSessionProcessor.abort")(() => Effect.void),
+            partFromToolCall() {
+              return {
+                id: PartID.ascending(),
+                messageID: msg.id,
+                sessionID: msg.sessionID,
+                type: "tool",
+                callID: "fake",
+                tool: "fake",
+                state: { status: "pending", input: {}, raw: "" },
+              }
+            },
+            process: Effect.fn("TestSessionProcessor.process")((args) => {
+              captured.push([...args.system])
+              return Effect.succeed("continue" as const)
+            }),
+          } satisfies SessionProcessorModule.SessionProcessor.Handle)
+        }),
+      }),
+    )
+
+    const long = "x".repeat(5000)
+    const agentLayer = Layer.succeed(
+      Agent.Service,
+      Agent.Service.of({
+        get: Effect.fn("TestAgent.get")((name: string) => {
+          if (name === "compaction")
+            return Effect.succeed({
+              name: "compaction",
+              mode: "all" as const,
+              permission: [],
+              options: {},
+            })
+          return Effect.succeed({
+            name,
+            mode: "all" as const,
+            permission: [],
+            options: {},
+            prompt: long,
+          })
+        }),
+        list: Effect.fn("TestAgent.list")(() => Effect.succeed([])),
+        defaultAgent: Effect.fn("TestAgent.defaultAgent")(() => Effect.succeed("build")),
+        generate: Effect.fn("TestAgent.generate")(() =>
+          Effect.succeed({ identifier: "", whenToUse: "", systemPrompt: "" }),
+        ),
+      }),
+    )
+
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const session = await Session.create({})
+        const msg = await user(session.id, "hello")
+        const msgs = await Session.messages({ sessionID: session.id })
+        const bus = Bus.layer
+        const rt = ManagedRuntime.make(
+          Layer.mergeAll(SessionCompaction.layer, bus).pipe(
+            Layer.provide(wide().layer),
+            Layer.provide(Session.defaultLayer),
+            Layer.provide(capLayer),
+            Layer.provide(agentLayer),
+            Layer.provide(Plugin.defaultLayer),
+            Layer.provide(bus),
+            Layer.provide(Config.defaultLayer),
+          ),
+        )
+        try {
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({
+                parentID: msg.id,
+                messages: msgs,
+                sessionID: session.id,
+                auto: false,
+              }),
+            ),
+          )
+          expect(captured.length).toBeGreaterThan(0)
+          const sys = captured[0]!
+          expect(sys.length).toBe(1)
+          expect(sys[0]!.length).toBeLessThanOrEqual(4000)
+          expect(sys[0]).toContain("[...truncated]")
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
+
+  test("injects system-reminder for non-native agent with prompt", async () => {
+    const captured: { system: string[][]; parts: Array<{ type: string; text?: string }[]> } = { system: [], parts: [] }
+    const capLayer = Layer.succeed(
+      SessionProcessorModule.SessionProcessor.Service,
+      SessionProcessorModule.SessionProcessor.Service.of({
+        create: Effect.fn("TestSessionProcessor.create")((input) => {
+          const msg = input.assistantMessage
+          return Effect.succeed({
+            get message() {
+              return msg
+            },
+            abort: Effect.fn("TestSessionProcessor.abort")(() => Effect.void),
+            partFromToolCall() {
+              return {
+                id: PartID.ascending(),
+                messageID: msg.id,
+                sessionID: msg.sessionID,
+                type: "tool",
+                callID: "fake",
+                tool: "fake",
+                state: { status: "pending", input: {}, raw: "" },
+              }
+            },
+            process: Effect.fn("TestSessionProcessor.process")((args) => {
+              captured.system.push([...args.system])
+              return Effect.succeed("continue" as const)
+            }),
+          } satisfies SessionProcessorModule.SessionProcessor.Handle)
+        }),
+      }),
+    )
+
+    const agentLayer = Layer.succeed(
+      Agent.Service,
+      Agent.Service.of({
+        get: Effect.fn("TestAgent.get")((name: string) => {
+          if (name === "compaction")
+            return Effect.succeed({
+              name: "compaction",
+              mode: "all" as const,
+              permission: [],
+              options: {},
+            })
+          return Effect.succeed({
+            name,
+            mode: "all" as const,
+            permission: [],
+            options: {},
+            prompt: "You are a specialized build agent.",
+          })
+        }),
+        list: Effect.fn("TestAgent.list")(() => Effect.succeed([])),
+        defaultAgent: Effect.fn("TestAgent.defaultAgent")(() => Effect.succeed("build")),
+        generate: Effect.fn("TestAgent.generate")(() =>
+          Effect.succeed({ identifier: "", whenToUse: "", systemPrompt: "" }),
+        ),
+      }),
+    )
+
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const session = await Session.create({})
+        const msg = await user(session.id, "hello")
+        const msgs = await Session.messages({ sessionID: session.id })
+        const bus = Bus.layer
+        const rt = ManagedRuntime.make(
+          Layer.mergeAll(SessionCompaction.layer, bus).pipe(
+            Layer.provide(wide().layer),
+            Layer.provide(Session.defaultLayer),
+            Layer.provide(capLayer),
+            Layer.provide(agentLayer),
+            Layer.provide(Plugin.defaultLayer),
+            Layer.provide(bus),
+            Layer.provide(Config.defaultLayer),
+          ),
+        )
+        try {
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({
+                parentID: msg.id,
+                messages: msgs,
+                sessionID: session.id,
+                auto: true,
+              }),
+            ),
+          )
+
+          const all = await Session.messages({ sessionID: session.id })
+          const reminder = all
+            .flatMap((m) => m.parts)
+            .find((p) => p.type === "text" && "text" in p && p.text.includes("<system-reminder>"))
+          expect(reminder).toBeDefined()
+          if (reminder?.type === "text") {
+            expect(reminder.text).toContain("system-reminder")
+            expect(reminder.text).toContain("build")
+          }
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
+
+  test("does not inject system-reminder for native agent with prompt", async () => {
+    const captured: string[][] = []
+    const capLayer = Layer.succeed(
+      SessionProcessorModule.SessionProcessor.Service,
+      SessionProcessorModule.SessionProcessor.Service.of({
+        create: Effect.fn("TestSessionProcessor.create")((input) => {
+          const msg = input.assistantMessage
+          return Effect.succeed({
+            get message() {
+              return msg
+            },
+            abort: Effect.fn("TestSessionProcessor.abort")(() => Effect.void),
+            partFromToolCall() {
+              return {
+                id: PartID.ascending(),
+                messageID: msg.id,
+                sessionID: msg.sessionID,
+                type: "tool",
+                callID: "fake",
+                tool: "fake",
+                state: { status: "pending", input: {}, raw: "" },
+              }
+            },
+            process: Effect.fn("TestSessionProcessor.process")((args) => {
+              captured.push([...args.system])
+              return Effect.succeed("continue" as const)
+            }),
+          } satisfies SessionProcessorModule.SessionProcessor.Handle)
+        }),
+      }),
+    )
+
+    const agentLayer = Layer.succeed(
+      Agent.Service,
+      Agent.Service.of({
+        get: Effect.fn("TestAgent.get")((name: string) => {
+          if (name === "compaction")
+            return Effect.succeed({
+              name: "compaction",
+              mode: "all" as const,
+              permission: [],
+              options: {},
+            })
+          return Effect.succeed({
+            name,
+            mode: "all" as const,
+            permission: [],
+            options: {},
+            prompt: "You are a native explore agent.",
+            native: true,
+          })
+        }),
+        list: Effect.fn("TestAgent.list")(() => Effect.succeed([])),
+        defaultAgent: Effect.fn("TestAgent.defaultAgent")(() => Effect.succeed("build")),
+        generate: Effect.fn("TestAgent.generate")(() =>
+          Effect.succeed({ identifier: "", whenToUse: "", systemPrompt: "" }),
+        ),
+      }),
+    )
+
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const session = await Session.create({})
+        const msg = await user(session.id, "hello")
+        const msgs = await Session.messages({ sessionID: session.id })
+        const bus = Bus.layer
+        const rt = ManagedRuntime.make(
+          Layer.mergeAll(SessionCompaction.layer, bus).pipe(
+            Layer.provide(wide().layer),
+            Layer.provide(Session.defaultLayer),
+            Layer.provide(capLayer),
+            Layer.provide(agentLayer),
+            Layer.provide(Plugin.defaultLayer),
+            Layer.provide(bus),
+            Layer.provide(Config.defaultLayer),
+          ),
+        )
+        try {
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({
+                parentID: msg.id,
+                messages: msgs,
+                sessionID: session.id,
+                auto: true,
+              }),
+            ),
+          )
+
+          // Native agent should not get system prompt injected
+          expect(captured.length).toBeGreaterThan(0)
+          expect(captured[0]!.length).toBe(0)
+
+          // No system-reminder part should exist
+          const all = await Session.messages({ sessionID: session.id })
+          const reminder = all
+            .flatMap((m) => m.parts)
+            .find((p) => p.type === "text" && "text" in p && p.text.includes("<system-reminder>"))
+          expect(reminder).toBeUndefined()
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
 })
 
 describe("util.token.estimate", () => {

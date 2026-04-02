@@ -13,6 +13,7 @@ import { Plugin } from "@/plugin"
 import { Config } from "@/config"
 import { NotFoundError } from "@/storage"
 import { ModelID, ProviderID } from "@/provider/schema"
+import { Todo } from "./todo"
 import { Effect, Layer, Context } from "effect"
 import { InstanceState } from "@/effect"
 import { isOverflow as overflow } from "./overflow"
@@ -31,6 +32,12 @@ export const Event = {
 export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
+
+export function formatTodos(todos: Todo.Info[]): string | undefined {
+  if (todos.length === 0) return undefined
+  const items = todos.map((t) => `- [${t.status}] (${t.priority}) ${t.content}`).join("\n")
+  return `\n\n## Current Task List\nThe agent is tracking the following tasks (persisted in the database — these survive compaction):\n${items}`
+}
 
 export interface Interface {
   readonly isOverflow: (input: {
@@ -179,10 +186,10 @@ export const layer: Layer.Layer<
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
-        { sessionID: input.sessionID },
+        { sessionID: input.sessionID, agent: userMessage.agent },
         { context: [], prompt: undefined },
       )
-      const defaultPrompt = `Provide a detailed prompt for continuing our conversation above.
+      let defaultPrompt = `Provide a detailed prompt for continuing our conversation above.
 Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do next.
 The summary that you construct will be used so that another agent can read it and continue the work.
 Do not call any tools. Respond only with the summary text.
@@ -190,6 +197,10 @@ Respond in the same language as the user's messages in the conversation.
 
 When constructing the summary, try to stick to this template:
 ---
+## Agent Role & Constraints
+
+[If the system prompt indicates a specialized agent role (e.g. evaluator, reviewer, judge, explorer, planner), state the agent name, its role, and any behavioral constraints (read-only, no implementation, output format requirements). If the agent is a general-purpose implementor, write "Default agent — no special constraints." Frame next steps in terms appropriate to the agent's role: evaluators should evaluate, reviewers should review, planners should plan — do NOT frame all agents as implementors.]
+
 ## Goal
 
 [What goal(s) is the user trying to accomplish?]
@@ -211,6 +222,22 @@ When constructing the summary, try to stick to this template:
 
 [Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the path to the directory.]
 ---`
+
+      const todos = Todo.get(input.sessionID)
+      const section = formatTodos(todos)
+      if (section) {
+        defaultPrompt += section
+      }
+
+      // Resolve the source agent to preserve its identity during compaction
+      const source = yield* agents.get(userMessage.agent)
+      const system: string[] = []
+      if (source?.prompt && !source.native) {
+        const max = 4000
+        const suffix = "\n[...truncated]"
+        const text = source.prompt.length > max ? source.prompt.slice(0, max - suffix.length) + suffix : source.prompt
+        system.push(text)
+      }
 
       const prompt = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
       const msgs = structuredClone(messages)
@@ -254,7 +281,7 @@ When constructing the summary, try to stick to this template:
         agent,
         sessionID: input.sessionID,
         tools: {},
-        system: [],
+        system,
         messages: [
           ...modelMessages,
           {
@@ -277,6 +304,12 @@ When constructing the summary, try to stick to this template:
       }
 
       if (result === "continue" && input.auto) {
+        // Inject post-compaction agent identity reminder for specialized agents
+        const reminder =
+          source?.prompt && !source.native
+            ? `<system-reminder>You are the "${userMessage.agent}" agent. Your role and constraints from your system prompt still apply after this compaction. Do not deviate from your assigned role.</system-reminder>`
+            : undefined
+
         if (replay) {
           const original = replay.info
           const replayMsg = yield* session.updateMessage({
@@ -301,6 +334,17 @@ When constructing the summary, try to stick to this template:
               id: PartID.ascending(),
               messageID: replayMsg.id,
               sessionID: input.sessionID,
+            })
+          }
+          if (reminder) {
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: replayMsg.id,
+              sessionID: input.sessionID,
+              type: "text",
+              synthetic: true,
+              text: reminder,
+              time: { start: Date.now(), end: Date.now() },
             })
           }
         }
@@ -348,7 +392,7 @@ When constructing the summary, try to stick to this template:
               // This is not a stable plugin contract and may change or disappear.
               metadata: { compaction_continue: true },
               synthetic: true,
-              text,
+              text: reminder ? text + "\n\n" + reminder : text,
               time: {
                 start: Date.now(),
                 end: Date.now(),
