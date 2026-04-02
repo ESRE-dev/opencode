@@ -10,6 +10,7 @@ import { LSP } from "../lsp"
 import DESCRIPTION from "./read.txt"
 import { Instance } from "../project/instance"
 import { assertExternalDirectoryEffect } from "./external-directory"
+import { realpath } from "../util/filesystem"
 import { Instruction } from "../session/instruction"
 
 const DEFAULT_READ_LIMIT = 2000
@@ -89,6 +90,7 @@ export const ReadTool = Tool.define(
       if (process.platform === "win32") {
         filepath = AppFileSystem.normalizePath(filepath)
       }
+      filepath = realpath(filepath)
       const title = path.relative(Instance.worktree, filepath)
 
       const stat = yield* fs.stat(filepath).pipe(

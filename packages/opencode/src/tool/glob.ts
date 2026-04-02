@@ -6,6 +6,7 @@ import { InstanceState } from "@/effect"
 import { AppFileSystem } from "@opencode-ai/shared/filesystem"
 import { Ripgrep } from "../file/ripgrep"
 import { assertExternalDirectoryEffect } from "./external-directory"
+import { realpath } from "../util/filesystem"
 import DESCRIPTION from "./glob.txt"
 import * as Tool from "./tool"
 
@@ -40,7 +41,7 @@ export const GlobTool = Tool.define(
           })
 
           let search = params.path ?? ins.directory
-          search = path.isAbsolute(search) ? search : path.resolve(ins.directory, search)
+          search = realpath(path.isAbsolute(search) ? search : path.resolve(ins.directory, search))
           const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
           if (info?.type === "File") {
             throw new Error(`glob path must be a directory: ${search}`)

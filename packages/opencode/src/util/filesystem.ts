@@ -1,10 +1,22 @@
 import { chmod, mkdir, readFile, stat as statFile, writeFile } from "fs/promises"
 import { createWriteStream, existsSync, statSync } from "fs"
 import { realpathSync } from "fs"
-import { dirname, join, relative, resolve as pathResolve, win32 } from "path"
+import { basename, dirname, join, relative, resolve as pathResolve, win32 } from "path"
 import { Readable } from "stream"
 import { pipeline } from "stream/promises"
 import { Glob } from "@opencode-ai/shared/util/glob"
+
+export function realpath(p: string): string {
+  try {
+    return realpathSync.native(p)
+  } catch {
+    try {
+      return join(realpathSync.native(dirname(p)), basename(p))
+    } catch {
+      return p
+    }
+  }
+}
 
 // Fast sync version for metadata checks
 export async function exists(p: string): Promise<boolean> {

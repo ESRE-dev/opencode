@@ -17,6 +17,7 @@ import { Format } from "../format"
 import { Instance } from "../project/instance"
 import { Snapshot } from "@/snapshot"
 import { assertExternalDirectoryEffect } from "./external-directory"
+import { realpath } from "../util/filesystem"
 import { AppFileSystem } from "@opencode-ai/shared/filesystem"
 
 function normalizeLineEndings(text: string): string {
@@ -60,9 +61,9 @@ export const EditTool = Tool.define(
             throw new Error("No changes to apply: oldString and newString are identical.")
           }
 
-          const filePath = path.isAbsolute(params.filePath)
-            ? params.filePath
-            : path.join(Instance.directory, params.filePath)
+          const filePath = realpath(
+            path.isAbsolute(params.filePath) ? params.filePath : path.join(Instance.directory, params.filePath),
+          )
           yield* assertExternalDirectoryEffect(ctx, filePath)
 
           let diff = ""

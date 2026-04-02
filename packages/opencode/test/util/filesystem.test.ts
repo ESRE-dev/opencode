@@ -653,4 +653,115 @@ describe("filesystem", () => {
       expect(Filesystem.normalizePathPattern(path.join(root, "*"))).toBe(path.join(root, "*"))
     })
   })
+
+  describe("realpath()", () => {
+    test("resolves existing file to its real path", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "test.txt")
+      await fs.writeFile(filepath, "content", "utf-8")
+
+      const result = Filesystem.realpath(filepath)
+      expect(result).toBe(filepath)
+    })
+
+    test("resolves non-existent file via parent directory fallback", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "does-not-exist.txt")
+
+      const result = Filesystem.realpath(filepath)
+      expect(result).toBe(filepath)
+    })
+
+    test("returns original path when both file and parent fail", () => {
+      const bogus = "/nonexistent-root-abc123/nested/file.txt"
+      const result = Filesystem.realpath(bogus)
+      expect(result).toBe(bogus)
+    })
+
+    test("resolves symlink to its target", async () => {
+      await using tmp = await tmpdir()
+      const target = path.join(tmp.path, "real.txt")
+      await fs.writeFile(target, "content", "utf-8")
+      const link = path.join(tmp.path, "link.txt")
+      await fs.symlink(target, link)
+
+      const result = Filesystem.realpath(link)
+      expect(result).toBe(target)
+    })
+
+    test("detects symlink escape outside project", async () => {
+      await using tmp = await tmpdir()
+      // Create a second temp dir to act as "outside"
+      await using outside = await tmpdir()
+      const secret = path.join(outside.path, "secret.txt")
+      await fs.writeFile(secret, "secret", "utf-8")
+
+      // Create symlink inside project pointing outside
+      const link = path.join(tmp.path, "escape")
+      await fs.symlink(outside.path, link)
+
+      const resolved = Filesystem.realpath(path.join(link, "secret.txt"))
+      // The resolved path should be outside the project
+      expect(Filesystem.contains(tmp.path, resolved)).toBe(false)
+    })
+
+    test("idempotency: realpath(realpath(p)) === realpath(p)", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "test.txt")
+      await fs.writeFile(filepath, "content", "utf-8")
+
+      const once = Filesystem.realpath(filepath)
+      const twice = Filesystem.realpath(once)
+      expect(twice).toBe(once)
+    })
+
+    test("preserves existing paths: result exists on disk", async () => {
+      await using tmp = await tmpdir()
+      const filepath = path.join(tmp.path, "test.txt")
+      await fs.writeFile(filepath, "content", "utf-8")
+
+      const resolved = Filesystem.realpath(filepath)
+      const exists = await fs.stat(resolved).then(
+        () => true,
+        () => false,
+      )
+      expect(exists).toBe(true)
+    })
+
+    test("resolves non-existent file in symlinked directory", async () => {
+      await using tmp = await tmpdir()
+      const real = path.join(tmp.path, "real")
+      await fs.mkdir(real)
+      const link = path.join(tmp.path, "link")
+      await fs.symlink(real, link)
+
+      const result = Filesystem.realpath(path.join(link, "new-file.txt"))
+      expect(result).toBe(path.join(real, "new-file.txt"))
+    })
+
+    test("gracefully handles circular symlink", async () => {
+      await using tmp = await tmpdir()
+      const a = path.join(tmp.path, "a")
+      const b = path.join(tmp.path, "b")
+      await fs.symlink(b, a)
+      await fs.symlink(a, b)
+
+      // Should not throw — graceful degradation returns original path
+      const result = Filesystem.realpath(a)
+      expect(typeof result).toBe("string")
+    })
+
+    test("resolves path with .. components correctly", async () => {
+      await using tmp = await tmpdir()
+      const sub = path.join(tmp.path, "subdir")
+      await fs.mkdir(sub)
+      const file = path.join(tmp.path, "target.txt")
+      await fs.writeFile(file, "content", "utf-8")
+
+      // Path that traverses up via ..
+      const tricky = path.join(sub, "..", "target.txt")
+      const result = Filesystem.realpath(tricky)
+      expect(result).toBe(file)
+    })
+  })
 })
