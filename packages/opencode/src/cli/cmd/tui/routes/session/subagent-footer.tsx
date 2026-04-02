@@ -8,6 +8,7 @@ import { useCommandDialog } from "@tui/component/dialog-command"
 import { useKeybind } from "../../context/keybind"
 import { Locale } from "@/util"
 import { useTerminalDimensions } from "@opentui/solid"
+import { usePromptRef } from "../../context/prompt"
 
 export function SubagentFooter() {
   const route = useRouteData("session")
@@ -58,7 +59,13 @@ export function SubagentFooter() {
   const { theme } = useTheme()
   const keybind = useKeybind()
   const command = useCommandDialog()
-  const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
+  const promptRef = usePromptRef()
+  const status = createMemo(() => sync.data.session_status?.[route.sessionID])
+  const isRunning = createMemo(() => {
+    const s = status()
+    return !!s && s.type !== "idle"
+  })
+  const [hover, setHover] = createSignal<"parent" | "prev" | "next" | "cancel" | null>(null)
   useTerminalDimensions()
 
   return (
@@ -123,6 +130,22 @@ export function SubagentFooter() {
                 Next <span style={{ fg: theme.textMuted }}>{keybind.print("session_child_cycle")}</span>
               </text>
             </box>
+            <Show when={isRunning()}>
+              <box
+                onMouseOver={() => setHover("cancel")}
+                onMouseOut={() => setHover(null)}
+                onMouseUp={() => command.trigger("session.interrupt")}
+                backgroundColor={hover() === "cancel" ? theme.backgroundElement : theme.backgroundPanel}
+              >
+                <text fg={theme.text}>
+                  Cancel{" "}
+                  <span style={{ fg: promptRef.current?.interrupt ? theme.primary : theme.textMuted }}>
+                    {keybind.print("session_interrupt")}
+                    {promptRef.current?.interrupt ? " again to confirm" : ""}
+                  </span>
+                </text>
+              </box>
+            </Show>
           </box>
         </box>
       </box>
