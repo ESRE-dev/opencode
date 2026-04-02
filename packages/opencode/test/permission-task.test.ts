@@ -85,16 +85,16 @@ describe("Permission.disabled for task tool", () => {
       action,
     }))
 
-  test("task tool is disabled when global deny pattern exists (even with specific allows)", () => {
-    // When "*": "deny" exists, the task tool is disabled because the disabled() function
-    // only checks for wildcard deny patterns - it doesn't consider that specific subagents might be allowed
+  test("task tool is NOT disabled when global deny exists but specific allows exist", () => {
+    // With specificity ranking, specific allows set the partial flag,
+    // preventing the tool from being fully disabled
     const ruleset = createRuleset({
       "orchestrator-*": "allow",
       "*": "deny",
     })
     const disabled = Permission.disabled(["task", "bash", "read"], ruleset)
-    // The task tool IS disabled because there's a pattern: "*" with action: "deny"
-    expect(disabled.has("task")).toBe(true)
+    // The task tool is NOT disabled because "orchestrator-*": "allow" sets partial flag
+    expect(disabled.has("task")).toBe(false)
   })
 
   test("task tool is disabled when global deny pattern exists (even with ask overrides)", () => {
@@ -137,9 +137,8 @@ describe("Permission.disabled for task tool", () => {
       "orchestrator-coder": "allow",
     })
     const disabled = Permission.disabled(["task"], ruleset)
-    // The disabled() function uses findLast and checks if the last matching rule
-    // has pattern: "*" and action: "deny". In this case, the last rule matching
-    // "task" permission has pattern "orchestrator-coder", not "*", so not disabled
+    // The disabled() function uses rank-based specificity to find the highest-ranked
+    // wildcard rule. A named pattern "allow" means partial access exists, so not disabled
     expect(disabled.has("task")).toBe(false)
   })
 })
@@ -253,14 +252,13 @@ describe("permission.task with real config files", () => {
         const disabled = Permission.disabled(["bash", "edit", "task"], ruleset)
         expect(disabled.has("bash")).toBe(false)
         expect(disabled.has("edit")).toBe(false)
-        // task is NOT disabled because disabled() uses findLast, and the last rule
-        // matching "task" permission is {pattern: "general", action: "allow"}, not pattern: "*"
+        // task is NOT disabled because "general": "allow" sets partial flag
         expect(disabled.has("task")).toBe(false)
       },
     })
   })
 
-  test("task tool disabled when global deny comes last in config", async () => {
+  test("specificity: exact rules beat wildcard deny in config", async () => {
     await using tmp = await tmpdir({
       git: true,
       config: {
@@ -279,20 +277,20 @@ describe("permission.task with real config files", () => {
         const config = await load()
         const ruleset = Permission.fromConfig(config.permission ?? {})
 
-        // Last matching rule wins - "*" deny is last, so all agents are denied
-        expect(Permission.evaluate("task", "general", ruleset).action).toBe("deny")
-        expect(Permission.evaluate("task", "code-reviewer", ruleset).action).toBe("deny")
+        // With specificity ranking, exact rules (rank 4) beat wildcard deny (rank 2)
+        expect(Permission.evaluate("task", "general", ruleset).action).toBe("allow")
+        expect(Permission.evaluate("task", "code-reviewer", ruleset).action).toBe("allow")
+        // Unknown agents still denied by the "*" deny
         expect(Permission.evaluate("task", "unknown", ruleset).action).toBe("deny")
 
-        // Since "*": "deny" is the last rule, disabled() finds it with findLast
-        // and sees pattern: "*" with action: "deny", so task is disabled
+        // disabled() sees specific allows (partial=true), so task is NOT disabled
         const disabled = Permission.disabled(["task"], ruleset)
-        expect(disabled.has("task")).toBe(true)
+        expect(disabled.has("task")).toBe(false)
       },
     })
   })
 
-  test("task tool NOT disabled when specific allow comes last in config", async () => {
+  test("task tool NOT disabled when specific allow exists alongside deny", async () => {
     await using tmp = await tmpdir({
       git: true,
       config: {
@@ -310,14 +308,12 @@ describe("permission.task with real config files", () => {
         const config = await load()
         const ruleset = Permission.fromConfig(config.permission ?? {})
 
-        // Evaluate uses findLast - "general" allow comes after "*" deny
+        // Specificity: "general" (exact, rank 4) beats "*" (bare, rank 2)
         expect(Permission.evaluate("task", "general", ruleset).action).toBe("allow")
-        // Other agents still denied by the earlier "*" deny
+        // Other agents still denied by the "*" deny
         expect(Permission.evaluate("task", "code-reviewer", ruleset).action).toBe("deny")
 
-        // disabled() uses findLast and checks if the last rule has pattern: "*" with action: "deny"
-        // In this case, the last rule is {pattern: "general", action: "allow"}, not pattern: "*"
-        // So the task tool is NOT disabled (even though most subagents are denied)
+        // disabled() sees "general": "allow" (partial=true), so task is NOT disabled
         const disabled = Permission.disabled(["task"], ruleset)
         expect(disabled.has("task")).toBe(false)
       },

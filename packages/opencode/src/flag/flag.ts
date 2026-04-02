@@ -14,7 +14,7 @@ function number(key: string) {
   const value = process.env[key]
   if (!value) return undefined
   const parsed = Number(value)
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined
 }
 
 const OPENCODE_EXPERIMENTAL = truthy("OPENCODE_EXPERIMENTAL")
@@ -52,6 +52,7 @@ export const Flag = {
   OPENCODE_SERVER_PASSWORD: process.env["OPENCODE_SERVER_PASSWORD"],
   OPENCODE_SERVER_USERNAME: process.env["OPENCODE_SERVER_USERNAME"],
   OPENCODE_ENABLE_QUESTION_TOOL: truthy("OPENCODE_ENABLE_QUESTION_TOOL"),
+  OPENCODE_PERMISSION_TIMEOUT: number("OPENCODE_PERMISSION_TIMEOUT") ?? 30_000,
 
   // Experimental
   OPENCODE_EXPERIMENTAL,

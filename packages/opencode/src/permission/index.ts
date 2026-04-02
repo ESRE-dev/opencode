@@ -1,3 +1,4 @@
+import { Flag } from "@/flag/flag"
 import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
 import { ConfigPermission } from "@/config/permission"
@@ -12,7 +13,7 @@ import { withStatics } from "@/util/schema"
 import { Wildcard } from "@/util"
 import { Deferred, Effect, Layer, Schema, Context } from "effect"
 import os from "os"
-import { evaluate as evalRule } from "./evaluate"
+import { evaluate as evalRule, rank } from "./evaluate"
 import { PermissionID } from "./schema"
 
 const log = Log.create({ service: "permission" })
@@ -131,6 +132,7 @@ export interface Interface {
   readonly ask: (input: AskInput) => Effect.Effect<void, Error>
   readonly reply: (input: ReplyInput) => Effect.Effect<void>
   readonly list: () => Effect.Effect<ReadonlyArray<Request>>
+  readonly rejectSession: (sessionID: SessionID) => Effect.Effect<void>
 }
 
 interface PendingEntry {
@@ -206,9 +208,35 @@ export const layer = Layer.effect(
       const deferred = yield* Deferred.make<void, RejectedError | CorrectedError>()
       pending.set(id, { info, deferred })
       yield* bus.publish(Event.Asked, info)
+
+      const timeout = Flag.OPENCODE_PERMISSION_TIMEOUT
+      let timer: ReturnType<typeof setTimeout> | undefined
+      if (timeout > 0) {
+        timer = setTimeout(() => {
+          if (!pending.has(id)) return
+          log.warn("permission auto-approved after timeout", {
+            id,
+            permission: info.permission,
+            patterns: info.patterns,
+            timeout,
+          })
+          void Bus.publish(Event.Replied, {
+            sessionID: request.sessionID,
+            requestID: id,
+            reply: "once",
+          })
+          const entry = pending.get(id)
+          if (entry) {
+            pending.delete(id)
+            Effect.runSync(Deferred.succeed(entry.deferred, undefined))
+          }
+        }, timeout)
+      }
+
       return yield* Effect.ensuring(
         Deferred.await(deferred),
         Effect.sync(() => {
+          if (timer) clearTimeout(timer)
           pending.delete(id)
         }),
       )
@@ -277,7 +305,22 @@ export const layer = Layer.effect(
       return Array.from(pending.values(), (item) => item.info)
     })
 
-    return Service.of({ ask, reply, list })
+    const rejectSession = Effect.fn("Permission.rejectSession")(function* (sessionID: SessionID) {
+      const { pending } = yield* InstanceState.get(state)
+      for (const [id, entry] of pending.entries()) {
+        if (entry.info.sessionID !== sessionID) continue
+        pending.delete(id)
+        log.info("rejecting for cancelled session", { requestID: id, sessionID })
+        yield* bus.publish(Event.Replied, {
+          sessionID: entry.info.sessionID,
+          requestID: entry.info.id,
+          reply: "reject",
+        })
+        yield* Deferred.fail(entry.deferred, new RejectedError())
+      }
+    })
+
+    return Service.of({ ask, reply, list, rejectSession })
   }),
 )
 
@@ -313,11 +356,49 @@ export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
   const result = new Set<string>()
   for (const tool of tools) {
     const permission = EDIT_TOOLS.includes(tool) ? "edit" : tool
-    const rule = ruleset.findLast((rule) => Wildcard.match(permission, rule.permission))
-    if (!rule) continue
-    if (rule.pattern === "*" && rule.action === "deny") result.add(tool)
+    let best: Rule | undefined
+    let top = -1
+    let partial = false
+    for (const rule of ruleset) {
+      if (!Wildcard.match(permission, rule.permission)) continue
+      if (rule.pattern === "*") {
+        const s = rank(rule)
+        if (s >= top) {
+          best = rule
+          top = s
+        }
+      }
+      if (rule.pattern !== "*" && rule.action === "allow") partial = true
+    }
+    if (!best) continue
+    if (best.action === "deny" && !partial) result.add(tool)
   }
   return result
+}
+
+function runPromise<T>(fn: (s: Interface) => Effect.Effect<T>) {
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const service = yield* Service
+      return yield* fn(service)
+    }).pipe(Effect.provide(defaultLayer)),
+  )
+}
+
+export async function ask(input: AskInput) {
+  return runPromise((s) => s.ask(input))
+}
+
+export async function reply(input: ReplyInput) {
+  return runPromise((s) => s.reply(input))
+}
+
+export async function list() {
+  return runPromise((s) => s.list())
+}
+
+export async function rejectSession(sessionID: SessionID) {
+  return runPromise((s) => s.rejectSession(sessionID))
 }
 
 export const defaultLayer = layer.pipe(Layer.provide(Bus.layer))

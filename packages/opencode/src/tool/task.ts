@@ -7,6 +7,8 @@ import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "../config"
+import { Permission } from "@/permission"
+import { MCP } from "../mcp"
 import { Effect } from "effect"
 
 export interface TaskPromptOps {
@@ -59,41 +61,58 @@ export const TaskTool = Tool.define(
 
       const canTask = next.permission.some((rule) => rule.permission === id)
       const canTodo = next.permission.some((rule) => rule.permission === "todowrite")
+      const mcpKeys = Object.keys(
+        yield* Effect.tryPromise(() => MCP.tools()).pipe(Effect.catchAll(() => Effect.succeed({}))),
+      )
 
       const taskID = params.task_id
       const session = taskID
         ? yield* sessions.get(SessionID.make(taskID)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
+      const parent = yield* Effect.tryPromise(() => Session.get(ctx.sessionID)).pipe(
+        Effect.catchAll(() => Effect.succeed(undefined)),
+      )
+      const rules: Permission.Ruleset = [
+        ...(canTodo
+          ? []
+          : [
+              {
+                permission: "todowrite" as const,
+                pattern: "*" as const,
+                action: "deny" as const,
+              },
+            ]),
+        ...(canTask
+          ? []
+          : [
+              {
+                permission: id as string,
+                pattern: "*" as const,
+                action: "deny" as const,
+              },
+            ]),
+        {
+          permission: "question" as const,
+          pattern: "*" as const,
+          action: "deny" as const,
+        },
+        ...(cfg.experimental?.primary_tools?.map((item) => ({
+          pattern: "*",
+          action: "allow" as const,
+          permission: item,
+        })) ?? []),
+        ...mcpKeys.map((t) => ({
+          pattern: "*" as const,
+          action: "allow" as const,
+          permission: t,
+        })),
+      ]
       const nextSession =
         session ??
         (yield* sessions.create({
           parentID: ctx.sessionID,
           title: params.description + ` (@${next.name} subagent)`,
-          permission: [
-            ...(canTodo
-              ? []
-              : [
-                  {
-                    permission: "todowrite" as const,
-                    pattern: "*" as const,
-                    action: "deny" as const,
-                  },
-                ]),
-            ...(canTask
-              ? []
-              : [
-                  {
-                    permission: id,
-                    pattern: "*" as const,
-                    action: "deny" as const,
-                  },
-                ]),
-            ...(cfg.experimental?.primary_tools?.map((item) => ({
-              pattern: "*",
-              action: "allow" as const,
-              permission: item,
-            })) ?? []),
-          ],
+          permission: Permission.merge(parent?.permission ?? [], rules),
         }))
 
       const msg = yield* Effect.sync(() => MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }))
@@ -139,6 +158,7 @@ export const TaskTool = Tool.define(
               tools: {
                 ...(canTodo ? {} : { todowrite: false }),
                 ...(canTask ? {} : { task: false }),
+                question: false,
                 ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
               },
               parts,

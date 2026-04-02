@@ -1,9 +1,10 @@
-import { afterEach, test, expect } from "bun:test"
+import { afterEach, describe, test, expect } from "bun:test"
 import os from "os"
 import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import { Bus } from "../../src/bus"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Permission } from "../../src/permission"
+import { rank } from "../../src/permission/evaluate"
 import { PermissionID } from "../../src/permission/schema"
 import { Instance } from "../../src/project/instance"
 import { provideInstance, provideTmpdirInstance, tmpdirScoped } from "../fixture/fixture"
@@ -250,12 +251,12 @@ test("evaluate - last matching rule wins", () => {
   expect(result.action).toBe("deny")
 })
 
-test("evaluate - last matching rule wins (wildcard after specific)", () => {
+test("evaluate - higher specificity wins over order (exact beats wildcard)", () => {
   const result = Permission.evaluate("bash", "rm", [
     { permission: "bash", pattern: "rm", action: "deny" },
     { permission: "bash", pattern: "*", action: "allow" },
   ])
-  expect(result.action).toBe("allow")
+  expect(result.action).toBe("deny")
 })
 
 test("evaluate - glob pattern match", () => {
@@ -271,7 +272,8 @@ test("evaluate - last matching glob wins", () => {
   expect(result.action).toBe("allow")
 })
 
-test("evaluate - order matters for specificity", () => {
+test("evaluate - equal specificity preserves last-wins (both non-trivial wildcards)", () => {
+  // If more specific rule comes first, later wildcard of same rank overrides it
   const result = Permission.evaluate("edit", "src/components/Button.tsx", [
     { permission: "edit", pattern: "src/components/*", action: "allow" },
     { permission: "edit", pattern: "src/*", action: "deny" },
@@ -327,12 +329,12 @@ test("evaluate - exact match at end wins over earlier wildcard", () => {
   expect(result.action).toBe("deny")
 })
 
-test("evaluate - wildcard at end overrides earlier exact match", () => {
+test("evaluate - exact match beats wildcard regardless of order", () => {
   const result = Permission.evaluate("bash", "/bin/rm", [
     { permission: "bash", pattern: "/bin/rm", action: "deny" },
     { permission: "bash", pattern: "*", action: "allow" },
   ])
-  expect(result.action).toBe("allow")
+  expect(result.action).toBe("deny")
 })
 
 // wildcard permission tests
@@ -387,12 +389,14 @@ test("evaluate - wildcard permission fallback for unknown tool", () => {
   expect(result.action).toBe("ask")
 })
 
-test("evaluate - permission patterns sorted by length regardless of object order", () => {
+test("evaluate - specific permission beats wildcard permission regardless of order", () => {
+  // specific permission listed before wildcard — specific should still win due to higher rank
   const result = Permission.evaluate("bash", "rm", [
     { permission: "bash", pattern: "*", action: "allow" },
     { permission: "*", pattern: "*", action: "deny" },
   ])
-  expect(result.action).toBe("deny")
+  // "bash" (exact, rank 2+0=2) beats "*" (bare, rank 0+0=0)
+  expect(result.action).toBe("allow")
 })
 
 test("evaluate - merges multiple rulesets", () => {
@@ -504,6 +508,7 @@ test("disabled - specific allow overrides wildcard deny", () => {
       { permission: "bash", pattern: "*", action: "allow" },
     ],
   )
+  // "bash" (exact, rank 2) beats "*" (bare, rank 0) — best wildcard rule for bash is allow
   expect(result.has("bash")).toBe(false)
   expect(result.has("edit")).toBe(true)
   expect(result.has("read")).toBe(true)
@@ -1078,3 +1083,128 @@ it.live("ask - abort should clear pending request", () =>
     if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toBeInstanceOf(Permission.RejectedError)
   }),
 )
+
+// specificity ranking tests
+
+describe("rank", () => {
+  test("Property 4: rank range invariant — rank is in [0, 4]", () => {
+    const cases = [
+      { permission: "*", pattern: "*" },
+      { permission: "*", pattern: "src/*" },
+      { permission: "*", pattern: "exact" },
+      { permission: "mcp_*", pattern: "*" },
+      { permission: "mcp_*", pattern: "src/*" },
+      { permission: "mcp_*", pattern: "exact" },
+      { permission: "bash", pattern: "*" },
+      { permission: "bash", pattern: "src/*" },
+      { permission: "bash", pattern: "exact" },
+    ]
+    for (const c of cases) {
+      const r = rank(c)
+      expect(r).toBeGreaterThanOrEqual(0)
+      expect(r).toBeLessThanOrEqual(4)
+    }
+  })
+
+  test("Property 5: rank determinism — same input gives same result", () => {
+    const rule = { permission: "bash", pattern: "src/*" }
+    expect(rank(rule)).toBe(rank(rule))
+    expect(rank(rule)).toBe(rank({ ...rule }))
+  })
+
+  test("exact permission + exact pattern = 4", () => {
+    expect(rank({ permission: "bash", pattern: "rm" })).toBe(4)
+  })
+
+  test("exact permission + non-trivial wildcard pattern = 3", () => {
+    expect(rank({ permission: "bash", pattern: "src/*" })).toBe(3)
+  })
+
+  test("exact permission + bare wildcard pattern = 2", () => {
+    expect(rank({ permission: "bash", pattern: "*" })).toBe(2)
+  })
+
+  test("non-trivial wildcard permission + exact pattern = 3", () => {
+    expect(rank({ permission: "mcp_*", pattern: "rm" })).toBe(3)
+  })
+
+  test("non-trivial wildcard permission + bare wildcard pattern = 1", () => {
+    expect(rank({ permission: "mcp_*", pattern: "*" })).toBe(1)
+  })
+
+  test("bare wildcard permission + bare wildcard pattern = 0", () => {
+    expect(rank({ permission: "*", pattern: "*" })).toBe(0)
+  })
+})
+
+describe("evaluate specificity", () => {
+  test("Property 6: best match dominance — evaluate returns highest-ranked", () => {
+    const result = Permission.evaluate("bash", "rm", [
+      { permission: "*", pattern: "*", action: "ask" },
+      { permission: "bash", pattern: "*", action: "allow" },
+      { permission: "bash", pattern: "rm", action: "deny" },
+    ])
+    // rank 0, rank 2, rank 4 — highest is deny
+    expect(result.action).toBe("deny")
+  })
+
+  test("Property 7: backward compatibility — equal-rank rules use last-wins", () => {
+    const result = Permission.evaluate("bash", "rm", [
+      { permission: "bash", pattern: "rm", action: "deny" },
+      { permission: "bash", pattern: "rm", action: "allow" },
+    ])
+    // Both rank 4, last wins
+    expect(result.action).toBe("allow")
+  })
+
+  test("higher-ranked rule wins even when earlier in list", () => {
+    const result = Permission.evaluate("bash", "rm", [
+      { permission: "bash", pattern: "rm", action: "deny" },
+      { permission: "*", pattern: "*", action: "allow" },
+    ])
+    // rank 4 vs rank 0 — deny wins
+    expect(result.action).toBe("deny")
+  })
+
+  test("non-trivial wildcard beats bare wildcard", () => {
+    const result = Permission.evaluate("mcp_server_tool", "anything", [
+      { permission: "*", pattern: "*", action: "deny" },
+      { permission: "mcp_*", pattern: "*", action: "allow" },
+    ])
+    // rank 0 vs rank 1 — allow wins
+    expect(result.action).toBe("allow")
+  })
+
+  test("non-trivial wildcard beats bare wildcard regardless of order", () => {
+    const result = Permission.evaluate("mcp_server_tool", "anything", [
+      { permission: "mcp_*", pattern: "*", action: "allow" },
+      { permission: "*", pattern: "*", action: "deny" },
+    ])
+    // rank 1 vs rank 0 — allow wins (higher rank)
+    expect(result.action).toBe("allow")
+  })
+})
+
+describe("disabled specificity", () => {
+  test("Property 9: disabled monotonicity — adding higher-specificity non-deny removes tool", () => {
+    const base: Permission.Ruleset = [{ permission: "*", pattern: "*", action: "deny" }]
+    const before = Permission.disabled(["bash"], base)
+    expect(before.has("bash")).toBe(true)
+
+    const extended: Permission.Ruleset = [...base, { permission: "bash", pattern: "*", action: "allow" }]
+    const after = Permission.disabled(["bash"], extended)
+    expect(after.has("bash")).toBe(false)
+  })
+
+  test("specific permission allow beats wildcard deny in disabled check", () => {
+    const result = Permission.disabled(
+      ["bash", "edit"],
+      [
+        { permission: "*", pattern: "*", action: "deny" },
+        { permission: "bash", pattern: "*", action: "allow" },
+      ],
+    )
+    expect(result.has("bash")).toBe(false)
+    expect(result.has("edit")).toBe(true)
+  })
+})
