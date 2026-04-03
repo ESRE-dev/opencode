@@ -263,6 +263,7 @@ When constructing the summary, try to stick to this template:
           },
         ],
         model,
+        toolChoice: "none",
       })
 
       if (result === "compact") {
