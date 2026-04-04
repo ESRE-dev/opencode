@@ -179,7 +179,7 @@ export const layer: Layer.Layer<
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
-        { sessionID: input.sessionID },
+        { sessionID: input.sessionID, agent: userMessage.agent },
         { context: [], prompt: undefined },
       )
       const defaultPrompt = `Provide a detailed prompt for continuing our conversation above.
@@ -190,6 +190,10 @@ Respond in the same language as the user's messages in the conversation.
 
 When constructing the summary, try to stick to this template:
 ---
+## Agent Role & Constraints
+
+[If the system prompt indicates a specialized agent role (e.g. evaluator, reviewer, judge, explorer, planner), state the agent name, its role, and any behavioral constraints (read-only, no implementation, output format requirements). If the agent is a general-purpose implementor, write "Default agent — no special constraints." Frame next steps in terms appropriate to the agent's role: evaluators should evaluate, reviewers should review, planners should plan — do NOT frame all agents as implementors.]
+
 ## Goal
 
 [What goal(s) is the user trying to accomplish?]
@@ -213,6 +217,15 @@ When constructing the summary, try to stick to this template:
 ---`
 
       const prompt = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
+      // Resolve the source agent to preserve its identity during compaction
+      const source = yield* agents.get(userMessage.agent)
+      const system: string[] = []
+      if (source?.prompt) {
+        const max = 4000
+        const truncated =
+          source.prompt.length > max ? source.prompt.slice(0, max) + "\n[...truncated]" : source.prompt
+        system.push(truncated)
+      }
       const msgs = structuredClone(messages)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
       const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, { stripMedia: true })
@@ -276,7 +289,7 @@ When constructing the summary, try to stick to this template:
         agent,
         sessionID: input.sessionID,
         tools: {},
-        system: [],
+        system,
         messages: [
           ...compactionMessages,
           {
@@ -300,6 +313,11 @@ When constructing the summary, try to stick to this template:
       }
 
       if (result === "continue" && input.auto) {
+        // Inject post-compaction agent identity reminder for specialized agents
+        const reminder =
+          source?.prompt && !source?.native
+            ? `<system-reminder>You are the "${userMessage.agent}" agent. Your role and constraints from your system prompt still apply after this compaction. Do not deviate from your assigned role.</system-reminder>`
+            : undefined
         if (replay) {
           const original = replay.info
           const replayMsg = yield* session.updateMessage({
@@ -324,6 +342,17 @@ When constructing the summary, try to stick to this template:
               id: PartID.ascending(),
               messageID: replayMsg.id,
               sessionID: input.sessionID,
+            })
+          }
+          if (reminder) {
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: replayMsg.id,
+              sessionID: input.sessionID,
+              type: "text",
+              synthetic: true,
+              text: reminder,
+              time: { start: Date.now(), end: Date.now() },
             })
           }
         }
@@ -371,7 +400,7 @@ When constructing the summary, try to stick to this template:
               // This is not a stable plugin contract and may change or disappear.
               metadata: { compaction_continue: true },
               synthetic: true,
-              text,
+              text: reminder ? text + "\n\n" + reminder : text,
               time: {
                 start: Date.now(),
                 end: Date.now(),
