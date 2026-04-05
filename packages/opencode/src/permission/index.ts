@@ -131,6 +131,7 @@ export interface Interface {
   readonly ask: (input: AskInput) => Effect.Effect<void, Error>
   readonly reply: (input: ReplyInput) => Effect.Effect<void>
   readonly list: () => Effect.Effect<ReadonlyArray<Request>>
+  readonly rejectSession: (sessionID: SessionID) => Effect.Effect<void>
 }
 
 interface PendingEntry {
@@ -277,7 +278,21 @@ export const layer = Layer.effect(
       return Array.from(pending.values(), (item) => item.info)
     })
 
-    return Service.of({ ask, reply, list })
+    const rejectSession = Effect.fn("Permission.rejectSession")(function* (sessionID: SessionID) {
+      const { pending } = yield* InstanceState.get(state)
+      for (const [id, item] of pending.entries()) {
+        if (item.info.sessionID !== sessionID) continue
+        pending.delete(id)
+        yield* bus.publish(Event.Replied, {
+          sessionID: item.info.sessionID,
+          requestID: item.info.id,
+          reply: "reject",
+        })
+        yield* Deferred.fail(item.deferred, new RejectedError())
+      }
+    })
+
+    return Service.of({ ask, reply, list, rejectSession })
   }),
 )
 

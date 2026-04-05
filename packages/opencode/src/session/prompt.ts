@@ -36,6 +36,7 @@ import { NamedError } from "@opencode-ai/shared/util/error"
 import { SessionProcessor } from "./processor"
 import { Tool } from "@/tool"
 import { Permission } from "@/permission"
+import { Question } from "@/question"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
 import { Shell } from "@/shell/shell"
@@ -90,6 +91,7 @@ export const layer = Layer.effect(
     const plugin = yield* Plugin.Service
     const commands = yield* Command.Service
     const permission = yield* Permission.Service
+    const question = yield* Question.Service
     const fsys = yield* AppFileSystem.Service
     const mcp = yield* MCP.Service
     const lsp = yield* LSP.Service
@@ -118,6 +120,8 @@ export const layer = Layer.effect(
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
       yield* elog.info("cancel", { sessionID })
       yield* state.cancel(sessionID)
+      yield* permission.rejectSession(sessionID)
+      yield* question.rejectSession(sessionID)
     })
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
@@ -1679,6 +1683,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(SessionProcessor.defaultLayer),
     Layer.provide(Command.defaultLayer),
     Layer.provide(Permission.defaultLayer),
+    Layer.provide(Question.defaultLayer),
     Layer.provide(MCP.defaultLayer),
     Layer.provide(LSP.defaultLayer),
     Layer.provide(ToolRegistry.defaultLayer),
