@@ -12,7 +12,7 @@ import { Instance } from "./instance"
 import { Log } from "@/util/log"
 import { ShareNext } from "@/share/share-next"
 import { Database, sql } from "../storage/db"
-import { PartTable, SessionTable } from "../session/session.sql"
+import { PartTable } from "../session/session.sql"
 import { SessionPrompt } from "../session/prompt"
 import { SessionActivity } from "../session/activity"
 import { SessionID } from "../session/schema"
@@ -35,6 +35,7 @@ export async function InstanceBootstrap() {
   Vcs.init()
   Snapshot.init()
   SessionActivity.init()
+  SessionPrompt.init()
   cleanupOrphanedParts()
   watchdog()
 
@@ -93,7 +94,7 @@ function cleanupOrphanedParts() {
  *
  * Exported for testing.
  */
-export function watchdogTick(cutoff: number, idle?: number, taskCutoff?: number) {
+export function watchdogTick(cutoff: number, idle?: number) {
   Database.use((db) => {
     const stuck = db
       .select({
@@ -101,23 +102,20 @@ export function watchdogTick(cutoff: number, idle?: number, taskCutoff?: number)
         session_id: PartTable.session_id,
         tool: sql<string>`json_extract(${PartTable.data}, '$.tool')`,
         child: sql<string | null>`json_extract(${PartTable.data}, '$.state.metadata.sessionId')`,
-        start: sql<number>`json_extract(${PartTable.data}, '$.state.time.start')`,
       })
       .from(PartTable)
       .where(
         sql`json_extract(${PartTable.data}, '$.type') = 'tool'
             AND json_extract(${PartTable.data}, '$.state.status') = 'running'
-            AND json_extract(${PartTable.data}, '$.state.time.start') < ${Math.max(cutoff, taskCutoff ?? cutoff)}`,
+            AND json_extract(${PartTable.data}, '$.state.time.start') < ${cutoff}`,
       )
       .all()
-      // Apply per-tool-type cutoff: task tools use taskCutoff, others use cutoff
-      .filter((r) => r.start < (r.tool === "task" ? (taskCutoff ?? cutoff) : cutoff))
 
-    const cancelled = new Set<SessionID>()
+    const cancelled = new Set<string>()
 
     if (stuck.length > 0) {
       // Sessions that contain at least one stuck tool
-      const stuckSessions = new Set(stuck.map((r) => SessionID.make(r.session_id)))
+      const stuckSessions = new Set(stuck.map((r) => r.session_id))
 
       // A task tool whose child session also has stuck tools is just
       // waiting — it will resolve once the child is cancelled.
@@ -142,17 +140,15 @@ export function watchdogTick(cutoff: number, idle?: number, taskCutoff?: number)
         // For non-task leaves, cancel the owning session directly.
         for (const r of leaf) {
           if (r.tool === "task" && r.child) {
-            const sid = SessionID.make(r.child)
-            if (cancelled.has(sid)) continue
-            cancelled.add(sid)
+            if (cancelled.has(r.child)) continue
+            cancelled.add(r.child)
             log.warn("watchdog: cancelling stuck child session", { child: r.child, parent: r.session_id })
-            SessionPrompt.cancel(sid).catch(() => {})
+            SessionPrompt.cancel(SessionID.make(r.child)).catch(() => {})
           } else {
-            const sid = SessionID.make(r.session_id)
-            if (cancelled.has(sid)) continue
-            cancelled.add(sid)
+            if (cancelled.has(r.session_id)) continue
+            cancelled.add(r.session_id)
             log.warn("watchdog: cancelling stuck session", { sessionID: r.session_id })
-            SessionPrompt.cancel(sid).catch(() => {})
+            SessionPrompt.cancel(SessionID.make(r.session_id)).catch(() => {})
           }
         }
 
@@ -181,43 +177,26 @@ export function watchdogTick(cutoff: number, idle?: number, taskCutoff?: number)
     // --- Independent idle detection sweep ---
     // Runs on every tick when idle param is provided, regardless of
     // whether any stuck tool parts were found above.
-    // Only targets child (subagent) sessions — root sessions are never
-    // idle-cancelled since the user controls their lifecycle.
+    // Iterates ALL tracked sessions in SessionActivity, not just
+    // children of stuck task tools.
     if (idle) {
-      const stale = Object.entries(SessionActivity.list())
-        .filter(([id]) => {
-          if (cancelled.has(SessionID.make(id))) return false
-          return SessionActivity.stale(id, idle)
+      // Clean up stale pre-cancel entries that were never consumed
+      const now = Date.now()
+      for (const [id, ts] of SessionPrompt._precancelled) {
+        if (now - ts > idle) SessionPrompt._precancelled.delete(id)
+      }
+
+      for (const [id] of Object.entries(SessionActivity.list())) {
+        if (cancelled.has(id)) continue
+        if (!SessionActivity.stale(id, idle)) continue
+        const ts = SessionActivity.last(id)
+        log.warn("watchdog: idle session detected", {
+          sessionID: id,
+          last: ts,
+          threshold: idle,
         })
-        .map(([id]) => id)
-      if (stale.length > 0) {
-        // Batch-check which stale sessions are children (have parent_id)
-        const children = new Set(
-          db
-            .select({ id: SessionTable.id })
-            .from(SessionTable)
-            .where(
-              sql`${SessionTable.id} IN (${sql.join(
-                stale.map((id) => sql`${id}`),
-                sql`, `,
-              )})
-                  AND ${SessionTable.parent_id} IS NOT NULL`,
-            )
-            .all()
-            .map((r) => r.id),
-        )
-        for (const id of stale) {
-          const sid = SessionID.make(id)
-          if (!children.has(sid)) continue
-          const ts = SessionActivity.last(id)
-          log.warn("watchdog: idle session detected", {
-            sessionID: id,
-            last: ts,
-            threshold: idle,
-          })
-          cancelled.add(sid)
-          SessionPrompt.cancel(sid).catch(() => {})
-        }
+        cancelled.add(id)
+        SessionPrompt.cancel(SessionID.make(id)).catch(() => {})
       }
     }
   })
@@ -233,11 +212,12 @@ function watchdog() {
   const timer = setInterval(async () => {
     try {
       const cfg = await Config.get()
-      const tool = cfg.experimental?.tool_timeout ?? MAX_RUNNING
+      const base = cfg.experimental?.tool_timeout ?? MAX_RUNNING
       const task = cfg.experimental?.task_timeout ?? 1_800_000
       const idle = cfg.experimental?.idle_timeout ?? DEFAULT_IDLE
-      const now = Date.now()
-      watchdogTick(now - tool, idle, now - (task + 60_000))
+      const grace = 60_000
+      const max = Math.max(base, task + grace)
+      watchdogTick(Date.now() - max, idle)
     } catch {
       watchdogTick(Date.now() - MAX_RUNNING)
     }

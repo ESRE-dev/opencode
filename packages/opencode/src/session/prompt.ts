@@ -67,6 +67,22 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
 
+  export const SessionCancelledError = NamedError.create("SessionCancelledError", z.object({ sessionID: z.string() }))
+
+  /** @internal Exported for watchdog cleanup */
+  export const _precancelled = new Map<string, number>()
+
+  /**
+   * Subscribe to Bus events for cancel propagation.
+   * Bridges SessionProcessor.Event.CancelRequested → SessionPrompt.cancel().
+   */
+  export function init() {
+    log.info("init")
+    Bus.subscribe(SessionProcessor.Event.CancelRequested, (evt) => {
+      cancel(SessionID.make(evt.properties.sessionID)).catch(() => {})
+    })
+  }
+
   export interface Interface {
     readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
     readonly cancel: (sessionID: SessionID) => Effect.Effect<void>

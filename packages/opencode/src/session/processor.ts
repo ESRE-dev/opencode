@@ -2,6 +2,7 @@ import { Cause, Effect, Layer, ServiceMap } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Bus } from "@/bus"
+import { BusEvent } from "@/bus/bus-event"
 import { Config } from "@/config/config"
 import { Permission } from "@/permission"
 import { Plugin } from "@/plugin"
@@ -12,16 +13,49 @@ import { LLM } from "./llm"
 import { MessageV2 } from "./message-v2"
 import { isOverflow } from "./overflow"
 import { PartID } from "./schema"
-import type { SessionID } from "./schema"
+import { SessionID } from "./schema"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
 import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
+import z from "zod"
 
 export namespace SessionProcessor {
+  export const Event = {
+    CancelRequested: BusEvent.define("session.prompt.cancel", z.object({ sessionID: z.string() })),
+  }
   const DOOM_LOOP_THRESHOLD = 3
   const log = Log.create({ service: "session.processor" })
+
+  /** Recursively mark running tool parts as "error" for a child session and its descendants. */
+  export async function abortChildren(sessionID: string, visited = new Set<string>()) {
+    if (visited.has(sessionID)) return
+    visited.add(sessionID)
+    Bus.publish(Event.CancelRequested, { sessionID })
+    const msgs = await Session.messages({ sessionID: SessionID.make(sessionID) })
+    for (const msg of msgs) {
+      for (const part of msg.parts) {
+        if (part.type !== "tool") continue
+        if (part.state.status === "completed" || part.state.status === "error") continue
+        if (part.tool === "task" && part.state.status === "running" && part.state.metadata?.sessionId) {
+          await abortChildren(part.state.metadata.sessionId, visited)
+        }
+        await Session.updatePart({
+          ...part,
+          state: {
+            ...part.state,
+            status: "error",
+            error: "Tool execution aborted",
+            time: {
+              start: part.state.status === "running" ? part.state.time.start : Date.now(),
+              end: Date.now(),
+            },
+          },
+        })
+      }
+    }
+  }
 
   export type Result = "compact" | "stop" | "continue"
 
@@ -399,13 +433,36 @@ export namespace SessionProcessor {
           const parts = MessageV2.parts(ctx.assistantMessage.id)
           for (const part of parts) {
             if (part.type !== "tool" || part.state.status === "completed" || part.state.status === "error") continue
+            // Recursively abort child sessions spawned by task tools
+            if (part.tool === "task" && part.state.status === "running") {
+              const child = part.state.metadata?.sessionId
+              if (child) {
+                yield* Effect.promise(() => abortChildren(child))
+              }
+              yield* session.updatePart({
+                ...part,
+                state: {
+                  ...part.state,
+                  status: "error",
+                  error: "Tool execution aborted",
+                  time: {
+                    start: part.state.time.start,
+                    end: Date.now(),
+                  },
+                },
+              })
+              continue
+            }
             yield* session.updatePart({
               ...part,
               state: {
                 ...part.state,
                 status: "error",
                 error: "Tool execution aborted",
-                time: { start: Date.now(), end: Date.now() },
+                time: {
+                  start: part.state.status === "running" ? part.state.time.start : Date.now(),
+                  end: Date.now(),
+                },
               },
             })
           }

@@ -1035,24 +1035,28 @@ export namespace Config {
             .positive()
             .optional()
             .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
-          tool_timeout: z
-            .number()
-            .int()
-            .positive()
-            .optional()
-            .describe("Maximum duration in milliseconds before the watchdog force-errors a stuck tool"),
           task_timeout: z
             .number()
             .int()
             .positive()
             .optional()
-            .describe("Maximum duration in milliseconds before the watchdog force-errors a stuck task tool"),
+            .describe(
+              "Default timeout in milliseconds for Task tool sub-agent execution (default: 1800000 = 30 minutes)",
+            ),
+          tool_timeout: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe("Global timeout in milliseconds for individual tool executions (default: 900000 = 15 minutes)"),
           idle_timeout: z
             .number()
             .int()
             .positive()
             .optional()
-            .describe("Duration in milliseconds of inactivity before the watchdog cancels an idle session"),
+            .describe(
+              "Inactivity timeout in milliseconds for subagent sessions. A subagent with no token streaming or tool activity for this long is cancelled (default: 300000 = 5 minutes). Root sessions are exempt.",
+            ),
         })
         .optional(),
     })

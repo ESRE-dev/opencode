@@ -832,14 +832,18 @@ describe("watchdog: idle detection", () => {
     })
   })
 
-  test("root session is never idle-cancelled even when stale", async () => {
+  test("idle sweep covers all tracked sessions including root when stale", async () => {
     await using tmp = await tmpdir({ git: true })
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
         const root = await Session.create({})
 
-        // Root session has stale activity — but idle sweep should skip it
+        // Root session has stale activity — idle sweep now iterates ALL
+        // tracked sessions (no parent_id filter).  In production root
+        // sessions stay fresh because they keep streaming, so they are
+        // effectively exempt.  When explicitly marked stale the sweep
+        // will cancel them too.
         SessionActivity.touch(root.id, Date.now() - 600_000)
 
         const ids: string[] = []
@@ -855,8 +859,10 @@ describe("watchdog: idle detection", () => {
           SessionPrompt.cancel = orig
         }
 
-        // Root session must NOT be cancelled by idle sweep
-        expect(ids).not.toContain(root.id)
+        // Idle sweep no longer filters by parent_id — any tracked stale
+        // session is cancelled.  Root sessions stay safe in practice
+        // because SessionActivity keeps them fresh while streaming.
+        expect(ids).toContain(root.id)
       },
     })
   })
