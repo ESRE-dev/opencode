@@ -8,6 +8,13 @@ import type { SessionID, MessageID } from "../session/schema"
 import * as Truncate from "./truncate"
 import { Agent } from "@/agent/agent"
 
+const TOOL_TIMEOUT = 15 * 60 * 1000
+
+/** Compute the effective timeout for a non-task tool execution. Exported for testing. */
+export function timeout(input: { tool?: number }): number {
+  return input.tool ?? TOOL_TIMEOUT
+}
+
 interface Metadata {
   [key: string]: any
 }
@@ -127,7 +134,32 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
                 }),
             ),
           )
-          const result = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx)
+
+          const ms = yield* Effect.promise(async () => {
+            try {
+              const { AppRuntime } = await import("@/effect/app-runtime")
+              const { Config } = await import("../config")
+              return await AppRuntime.runPromise(Config.Service.use((svc) => svc.get())).then((cfg) =>
+                timeout({ tool: cfg.experimental?.tool_timeout }),
+              )
+            } catch {
+              return TOOL_TIMEOUT
+            }
+          })
+
+          // Task tool manages its own deadline inside task.ts — skip the
+          // outer timeout wrapper so nested tasks aren't starved of time.
+          const result =
+            id === "task"
+              ? yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx)
+              : yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(
+                  Effect.timeoutOrElse({
+                    duration: ms,
+                    orElse: () =>
+                      Effect.die(new Error(`Tool execution exceeded ${Math.round(ms / 1000)}s global timeout`)),
+                  }),
+                )
+
           if (result.metadata.truncated !== undefined) {
             return result
           }

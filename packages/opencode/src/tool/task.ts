@@ -14,12 +14,16 @@ import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import { abortAfterAny } from "@/util/abort"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
   prompt(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
 }
+
+const DEFAULT_TIMEOUT = 14_400_000 // 4 hours — zombie/stall protection, not performance pressure
+const MIN_TIMEOUT = 1_800_000 // 30 minutes — floor for LLM-specified values
 
 const id = "task"
 const BACKGROUND_DESCRIPTION = [
@@ -49,6 +53,10 @@ const BaseParameterFields = {
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
+  timeout: Schema.optional(Schema.Number).annotate({
+    description:
+      "Optional timeout in seconds for zombie/stall protection. Default: 4 hours. Minimum: 30 minutes. You almost never need to set this — only override if you have a specific reason.",
+  }),
 }
 
 const BaseParameters = Schema.Struct(BaseParameterFields)
@@ -304,9 +312,20 @@ export const TaskTool = Tool.define(
         runCancel.fork(cancel)
       }
 
+      const baseTimeout = cfg.experimental?.task_timeout ?? DEFAULT_TIMEOUT
+      const raw = params.timeout ? params.timeout * 1000 : baseTimeout
+      // MIN_TIMEOUT guards against LLM-specified timeouts that are too short.
+      const ms = params.timeout ? Math.max(MIN_TIMEOUT, raw) : raw
+      const deadline = abortAfterAny(ms, ctx.abort)
+
       return yield* Effect.acquireUseRelease(
         Effect.sync(() => {
           ctx.abort.addEventListener("abort", onAbort)
+          // Watchdog: a stalled subagent (deadlock or stuck on an external
+          // resource) would otherwise hold the parent session open forever.
+          // When the deadline fires, cancel the subagent through the same
+          // bridge used for user-initiated aborts.
+          deadline.signal.addEventListener("abort", onAbort)
         }),
         () =>
           Effect.gen(function* () {
@@ -315,6 +334,27 @@ export const TaskTool = Tool.define(
               background.waitForPromotion(nextSession.id),
             )
             if (result?.metadata?.background === true) return backgroundResult()
+            // A cancellation triggered by our own deadline (rather than the
+            // user) is reported as a timeout so the model knows it can resume.
+            if (deadline.signal.aborted && !ctx.abort.aborted) {
+              const limit = Math.round(ms / 1000)
+              return {
+                title: params.description,
+                metadata,
+                output: renderOutput({
+                  sessionID: nextSession.id,
+                  state: "error",
+                  summary: `Task timed out: ${params.description}`,
+                  text: [
+                    `TIMEOUT: Task exceeded ${limit}s deadline and was cancelled.`,
+                    `task_id: ${nextSession.id}`,
+                    "",
+                    "You can resume this task by passing the task_id above.",
+                    "Recommended: retry with a simpler or more focused prompt. Break large tasks into smaller sub-tasks.",
+                  ].join("\n"),
+                }),
+              }
+            }
             if (result?.status === "error") return yield* Effect.fail(new Error(result.error ?? "Task failed"))
             if (result?.status === "cancelled") return yield* Effect.fail(new Error("Task cancelled"))
             return {
@@ -330,6 +370,8 @@ export const TaskTool = Tool.define(
           }).pipe(
             Effect.ensuring(
               Effect.sync(() => {
+                deadline.clearTimeout()
+                deadline.signal.removeEventListener("abort", onAbort)
                 ctx.abort.removeEventListener("abort", onAbort)
               }),
             ),

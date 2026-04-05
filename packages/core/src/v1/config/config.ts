@@ -176,6 +176,12 @@ export const Info = Schema.Struct({
       mcp_timeout: Schema.optional(PositiveInt).annotate({
         description: "Timeout in milliseconds for model context protocol (MCP) requests",
       }),
+      task_timeout: Schema.optional(PositiveInt).annotate({
+        description: "Default timeout in milliseconds for Task tool sub-agent execution (default: 1800000 = 30 minutes)",
+      }),
+      tool_timeout: Schema.optional(PositiveInt).annotate({
+        description: "Global timeout in milliseconds for individual tool executions (default: 900000 = 15 minutes)",
+      }),
       policies: Schema.optional(Schema.mutable(Schema.Array(ConfigExperimental.Policy))).annotate({
         description: "Policy statements applied to supported resources, such as provider access",
       }),
