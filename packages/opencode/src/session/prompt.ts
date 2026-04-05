@@ -1486,7 +1486,21 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               sessionID,
               parentSessionID: session.parentID,
               system,
-              messages: [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])],
+              messages: [
+                ...modelMsgs,
+                ...(isLastStep
+                  ? [
+                      {
+                        role: (model.api.npm === "@ai-sdk/anthropic" ||
+                        model.api.npm === "@ai-sdk/google-vertex/anthropic" ||
+                        (model.api.npm === "@ai-sdk/amazon-bedrock" && model.api.id.includes("anthropic"))
+                          ? "assistant"
+                          : "user") as "assistant" | "user",
+                        content: MAX_STEPS,
+                      },
+                    ]
+                  : []),
+              ],
               tools,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
