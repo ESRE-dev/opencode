@@ -110,6 +110,14 @@ const live: Layer.Layer<
           .join("\n"),
       )
 
+      if (input.agent.mode === "subagent") {
+        system.push(
+          "When a tool call fails or returns an error, do NOT give up or end your session. " +
+            "Try alternative approaches: different URLs, web search, different file paths, or grep the codebase. " +
+            "Only report failure after exhausting reasonable alternatives.",
+        )
+      }
+
       const header = system[0]
       yield* plugin.trigger(
         "experimental.chat.system.transform",
