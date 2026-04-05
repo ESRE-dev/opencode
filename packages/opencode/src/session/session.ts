@@ -572,6 +572,7 @@ export const layer: Layer.Layer<
           updated: Date.now(),
         },
       }
+      if (!result.parentID) process.env.OPENCODE_SESSION_ID = result.id
       yield* Effect.logInfo("created", result)
 
       yield* events.publish(SessionV1.Event.Created, { sessionID: result.id, info: result })
