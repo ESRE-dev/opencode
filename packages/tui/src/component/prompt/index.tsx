@@ -59,6 +59,7 @@ import { readLocalAttachment } from "./local-attachment"
 
 export type PromptProps = {
   sessionID?: string
+  parentSessionID?: string
   visible?: boolean
   disabled?: boolean
   onSubmit?: () => void
@@ -85,6 +86,7 @@ function pastedFilepath(value: string, platform: string) {
 
 export type PromptRef = {
   focused: boolean
+  interrupt: number
   current: PromptInfo
   set(prompt: PromptInfo): void
   reset(): void
@@ -162,6 +164,7 @@ export function Prompt(props: PromptProps) {
   const keymap = useOpencodeKeymap()
   const agentShortcut = useCommandShortcut("agent.cycle")
   const paletteShortcut = useCommandShortcut("command.palette.show")
+  const interruptShortcut = useCommandShortcut("session.interrupt")
   const renderer = useRenderer()
   const exit = useExit()
   const dimensions = useTerminalDimensions()
@@ -281,6 +284,7 @@ export function Prompt(props: PromptProps) {
     mode: "normal" | "shell"
     extmarkToPartIndex: Map<number, number>
     interrupt: number
+    interruptTimeout: ReturnType<typeof setTimeout> | undefined
     placeholder: number
   }>({
     placeholder: randomIndex(list().length),
@@ -291,6 +295,7 @@ export function Prompt(props: PromptProps) {
     mode: "normal",
     extmarkToPartIndex: new Map(),
     interrupt: 0,
+    interruptTimeout: undefined,
   })
 
   createEffect(
@@ -298,6 +303,9 @@ export function Prompt(props: PromptProps) {
       () => props.sessionID,
       () => {
         setStore("placeholder", randomIndex(list().length))
+        clearTimeout(store.interruptTimeout)
+        setStore("interrupt", 0)
+        setStore("interruptTimeout", undefined)
       },
       { defer: true },
     ),
@@ -392,7 +400,7 @@ export function Prompt(props: PromptProps) {
         enabled: status().type !== "idle",
         run: () => {
           if (auto()?.visible) return
-          if (!input.focused) return
+          if (!input.focused && !props.parentSessionID) return
           // TODO: this should be its own command
           if (store.mode === "shell") {
             setStore("mode", "normal")
@@ -400,19 +408,28 @@ export function Prompt(props: PromptProps) {
           }
           if (!props.sessionID) return
 
-          setStore("interrupt", store.interrupt + 1)
+          if (store.interruptTimeout) {
+            clearTimeout(store.interruptTimeout)
+            setStore("interruptTimeout", undefined)
+          }
 
-          setTimeout(() => {
-            setStore("interrupt", 0)
-          }, 5000)
-
-          if (store.interrupt >= 2) {
+          if (store.interrupt) {
             void sdk.client.session.abort({
               sessionID: props.sessionID,
             })
             setStore("interrupt", 0)
+            dialog.clear()
+            return
           }
-          dialog.clear()
+
+          setStore("interrupt", store.interrupt + 1)
+          setStore(
+            "interruptTimeout",
+            setTimeout(() => {
+              setStore("interrupt", 0)
+              setStore("interruptTimeout", undefined)
+            }, 5000),
+          )
         },
       },
       {
@@ -576,6 +593,9 @@ export function Prompt(props: PromptProps) {
   const ref: PromptRef = {
     get focused() {
       return input.focused
+    },
+    get interrupt() {
+      return store.interrupt
     },
     get current() {
       return store.prompt
@@ -1004,8 +1024,6 @@ export function Prompt(props: PromptProps) {
 
       if (res.error) {
         if (finishMoveProgress) move.finishSubmit()
-        console.log("Creating a session failed:", res.error)
-
         toast.show({
           message: "Creating a session failed. Open console for more details.",
           variant: "error",
@@ -1564,10 +1582,10 @@ export function Prompt(props: PromptProps) {
                     })()}
                   </box>
                 </box>
-                <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
-                  esc{" "}
-                  <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
-                    {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
+                <text fg={store.interrupt ? theme.primary : theme.text}>
+                  {interruptShortcut()}{" "}
+                  <span style={{ fg: store.interrupt ? theme.primary : theme.textMuted }}>
+                    {store.interrupt ? "again to interrupt" : "interrupt"}
                   </span>
                 </text>
               </box>
