@@ -1277,7 +1277,18 @@ const layer = Layer.effect(
               system,
               messages: [
                 ...modelMsgs,
-                ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
+                ...(isLastStep
+                  ? [
+                      {
+                        role: (model.api.npm === "@ai-sdk/anthropic" ||
+                        model.api.npm === "@ai-sdk/google-vertex/anthropic" ||
+                        (model.api.npm === "@ai-sdk/amazon-bedrock" && model.api.id.includes("anthropic"))
+                          ? "assistant"
+                          : "user") as "assistant" | "user",
+                        content: MAX_STEPS_PROMPT,
+                      },
+                    ]
+                  : []),
               ],
               tools,
               model,
