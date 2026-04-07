@@ -230,6 +230,37 @@ export const Info = z
           .positive()
           .optional()
           .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
+        watchdog: z
+          .object({
+            model: z
+              .object({
+                providerID: z.string(),
+                modelID: z.string(),
+              })
+              .optional()
+              .describe("Model for watchdog agents. Defaults to provider's small/fast model."),
+            timeouts: z
+              .object({
+                stream_idle: z
+                  .number()
+                  .int()
+                  .positive()
+                  .optional()
+                  .describe("LLM stream idle timeout in seconds. Default: 120"),
+                task: z.number().int().positive().optional().describe("Task tool timeout in seconds. Default: 14400"),
+                bash: z.number().int().positive().optional().describe("Bash tool timeout in seconds. Default: 120"),
+                tool_default: z
+                  .number()
+                  .int()
+                  .positive()
+                  .optional()
+                  .describe("Default tool timeout in seconds for tools without a specific entry. Default: 300"),
+              })
+              .optional()
+              .describe("Per-tool-type timeout thresholds that trigger watchdog investigation."),
+          })
+          .optional()
+          .describe("Intelligent watchdog configuration for stuck session detection and recovery."),
       })
       .optional(),
   })
