@@ -34,30 +34,36 @@ export class DiagnosticStore extends ServiceMap.Service<DiagnosticStore, Diagnos
 
 const EVICTION_AGE = 5 * 60 * 1000
 
+const store = new Map<string, DiagnosticEntry>()
+
+function evict() {
+  const cutoff = Date.now() - EVICTION_AGE
+  for (const [key, entry] of store) {
+    if (entry.created < cutoff) store.delete(key)
+  }
+}
+
+export const diagnostics = {
+  set(id: string, report: string) {
+    evict()
+    store.set(id, { report, created: Date.now() })
+  },
+  get(id: string) {
+    evict()
+    return store.get(id)?.report
+  },
+  delete(id: string) {
+    store.delete(id)
+  },
+}
+
 export const DiagnosticStoreLive = Layer.effect(
   DiagnosticStore,
-  Effect.sync(() => {
-    const store = new Map<string, DiagnosticEntry>()
-
-    function evict() {
-      const cutoff = Date.now() - EVICTION_AGE
-      for (const [key, entry] of store) {
-        if (entry.created < cutoff) store.delete(key)
-      }
-    }
-
-    return DiagnosticStore.of({
-      set: (id: string, report: string) => {
-        evict()
-        store.set(id, { report, created: Date.now() })
-      },
-      get: (id: string) => {
-        evict()
-        return store.get(id)?.report
-      },
-      delete: (id: string) => {
-        store.delete(id)
-      },
-    })
-  }),
+  Effect.sync(() =>
+    DiagnosticStore.of({
+      set: diagnostics.set,
+      get: diagnostics.get,
+      delete: diagnostics.delete,
+    }),
+  ),
 )
