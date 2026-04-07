@@ -7,6 +7,10 @@ import { Agent } from "../agent/agent"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "../config"
 import { Effect, Schema } from "effect"
+import { abortAfterAny } from "@/util/abort"
+import { WATCHDOG_TIMEOUT_DEFAULTS, diagnostics } from "@/watchdog/error"
+import { spawnWatchdog } from "@/watchdog/spawn"
+import { errorMessage } from "@/util/error"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): void
@@ -14,7 +18,29 @@ export interface TaskPromptOps {
   prompt(input: SessionPrompt.PromptInput): Effect.Effect<MessageV2.WithParts>
 }
 
+const DEFAULT_TIMEOUT = 14_400_000
+const MIN_TIMEOUT = 30_000
+
 const id = "task"
+
+export function childText(
+  sessionID: string,
+  result: { ok: true; value: MessageV2.WithParts } | { ok: false; error: unknown },
+): string {
+  if (!result.ok) return `Child session error: ${errorMessage(result.error)}`
+
+  const msg = result.value
+  if (msg.info.role === "assistant" && msg.info.error && MessageV2.AbortedError.isInstance(msg.info.error)) {
+    const report = diagnostics.get(sessionID)
+    diagnostics.delete(sessionID)
+    if (report) return ["Child session was cancelled by watchdog. Diagnostic report:", "", report].join("\n")
+    return `Child session ${sessionID} was aborted.`
+  }
+
+  const text = msg.parts.findLast((x) => x.type === "text")?.text
+  if (!text) return "Child session returned no content."
+  return text
+}
 
 export const Parameters = Schema.Struct({
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
@@ -25,6 +51,9 @@ export const Parameters = Schema.Struct({
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
+  timeout: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))).annotate({
+    description: "Optional timeout in seconds for zombie/stall protection. Default: 4 hours. Minimum: 30 minutes.",
+  }),
 })
 
 export const TaskTool = Tool.define(
@@ -117,6 +146,29 @@ export const TaskTool = Tool.define(
 
       const messageID = MessageID.ascending()
 
+      const timeouts = config.experimental?.watchdog?.timeouts
+      const cfgMs = (timeouts?.task ?? WATCHDOG_TIMEOUT_DEFAULTS.task) * 1000
+      const paramMs = params.timeout ? Math.max(params.timeout * 1000, MIN_TIMEOUT) : undefined
+      const ms = paramMs ?? cfgMs
+      const deadline = abortAfterAny(ms, ctx.abort)
+
+      let watchdogSpawned = false
+      const onDeadline = () => {
+        if (watchdogSpawned) return
+        if (ctx.abort.aborted) return // user cancelled, not a timeout
+        watchdogSpawned = true
+        try {
+          spawnWatchdog({
+            stuckSessionID: session.id as any,
+            parentSessionID: ctx.sessionID as any,
+            trigger: { tool: "task", timeout: ms / 1000, elapsed: ms / 1000 },
+          }).catch(() => {})
+        } catch {
+          // never crash main session
+        }
+      }
+      deadline.signal.addEventListener("abort", onDeadline)
+
       function cancel() {
         ops.cancel(nextSession.id)
       }
@@ -128,21 +180,28 @@ export const TaskTool = Tool.define(
         () =>
           Effect.gen(function* () {
             const parts = yield* ops.resolvePromptParts(params.prompt)
-            const result = yield* ops.prompt({
-              messageID,
-              sessionID: nextSession.id,
-              model: {
-                modelID: model.modelID,
-                providerID: model.providerID,
-              },
-              agent: next.name,
-              tools: {
-                ...(canTodo ? {} : { todowrite: false }),
-                ...(canTask ? {} : { task: false }),
-                ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
-              },
-              parts,
-            })
+            const outcome = yield* ops
+              .prompt({
+                messageID,
+                sessionID: nextSession.id,
+                model: {
+                  modelID: model.modelID,
+                  providerID: model.providerID,
+                },
+                agent: next.name,
+                tools: {
+                  ...(canTodo ? {} : { todowrite: false }),
+                  ...(canTask ? {} : { task: false }),
+                  ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
+                },
+                parts,
+              })
+              .pipe(
+                Effect.map((value) => ({ ok: true as const, value })),
+                Effect.catchAll((error) => Effect.succeed({ ok: false as const, error })),
+              )
+
+            const text = childText(nextSession.id, outcome)
 
             return {
               title: params.description,
@@ -154,7 +213,7 @@ export const TaskTool = Tool.define(
                 `task_id: ${nextSession.id} (for resuming to continue this task if needed)`,
                 "",
                 "<task_result>",
-                result.parts.findLast((item) => item.type === "text")?.text ?? "",
+                text,
                 "</task_result>",
               ].join("\n"),
             }
@@ -162,6 +221,8 @@ export const TaskTool = Tool.define(
         () =>
           Effect.sync(() => {
             ctx.abort.removeEventListener("abort", cancel)
+            deadline.signal.removeEventListener("abort", onDeadline)
+            deadline.clearTimeout()
           }),
       )
     })
