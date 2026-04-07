@@ -33,3 +33,14 @@ export function abortAfterAny(ms: number, ...signals: AbortSignal[]) {
     clearTimeout: timeout.clearTimeout,
   }
 }
+
+/**
+ * Combines multiple AbortSignals into a single signal that aborts
+ * when any input signal aborts.
+ *
+ * @param signals Signals to combine
+ * @returns Combined signal
+ */
+export function raceSignal(...signals: AbortSignal[]) {
+  return AbortSignal.any(signals)
+}
