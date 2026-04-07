@@ -146,7 +146,7 @@ export const TaskTool = Tool.define(
 
       const messageID = MessageID.ascending()
 
-      const timeouts = config.experimental?.watchdog?.timeouts
+      const timeouts = cfg.experimental?.watchdog?.timeouts
       const cfgMs = (timeouts?.task ?? WATCHDOG_TIMEOUT_DEFAULTS.task) * 1000
       const paramMs = params.timeout ? Math.max(params.timeout * 1000, MIN_TIMEOUT) : undefined
       const ms = paramMs ?? cfgMs
@@ -159,7 +159,7 @@ export const TaskTool = Tool.define(
         watchdogSpawned = true
         try {
           spawnWatchdog({
-            stuckSessionID: session.id as any,
+            stuckSessionID: nextSession.id as any,
             parentSessionID: ctx.sessionID as any,
             trigger: { tool: "task", timeout: ms / 1000, elapsed: ms / 1000 },
           }).catch(() => {})
@@ -198,7 +198,7 @@ export const TaskTool = Tool.define(
               })
               .pipe(
                 Effect.map((value) => ({ ok: true as const, value })),
-                Effect.catchAll((error) => Effect.succeed({ ok: false as const, error })),
+                Effect.catch((error) => Effect.succeed({ ok: false as const, error })),
               )
 
             const text = childText(nextSession.id, outcome)

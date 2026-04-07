@@ -1,4 +1,4 @@
-import { Database, eq, sql, desc, and } from "../storage/db"
+import { Database, eq, sql, desc, and } from "../storage"
 import { PartTable, MessageTable, SessionTable } from "../session/session.sql"
 import type { SessionID } from "../session/schema"
 

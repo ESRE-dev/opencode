@@ -3,10 +3,11 @@ import { Session } from "../session"
 import { buildSystemPrompt, type SpawnInput } from "./prompt"
 import { abortAfterAny } from "../util/abort"
 import { diagnostics } from "./error"
-import { Config } from "../config/config"
-import { Provider } from "../provider/provider"
+import { Config } from "../config"
+import { Provider } from "../provider"
 import { ModelID, ProviderID } from "../provider/schema"
 import type { SessionID } from "../session/schema"
+import { AppRuntime } from "../effect/app-runtime"
 
 export interface WatchdogResult {
   action: "none" | "reprompted" | "cancelled"
@@ -23,7 +24,7 @@ export const WATCHDOG_MODELS: Record<string, string> = {
 const HARD_TIMEOUT = 60_000
 
 async function resolveModel() {
-  const cfg = await Config.get()
+  const cfg = await AppRuntime.runPromise(Config.Service.use((svc) => svc.get()))
   const watchdog = cfg.experimental?.watchdog?.model
   if (watchdog) {
     return {
@@ -31,7 +32,7 @@ async function resolveModel() {
       modelID: ModelID.make(watchdog.modelID),
     }
   }
-  const fallback = await Provider.defaultModel()
+  const fallback = await AppRuntime.runPromise(Provider.Service.use((svc) => svc.defaultModel()))
   const provider = fallback.providerID as string
   const mapped = WATCHDOG_MODELS[provider]
   if (mapped) return { providerID: fallback.providerID, modelID: ModelID.make(mapped) }
@@ -47,7 +48,9 @@ export async function spawnWatchdog(input: SpawnInput): Promise<WatchdogResult> 
     }
   }
 
-  const child = await Session.create({ parentID: input.parentSessionID })
+  const child = await AppRuntime.runPromise(
+    Session.Service.use((svc) => svc.create({ parentID: input.parentSessionID })),
+  )
   const system = await buildSystemPrompt(input)
   const model = await resolveModel()
 
@@ -55,24 +58,28 @@ export async function spawnWatchdog(input: SpawnInput): Promise<WatchdogResult> 
   const deadline = abortAfterAny(timeout)
 
   const onTimeout = () => {
-    SessionPrompt.cancel(child.id)
-    SessionPrompt.cancel(input.stuckSessionID)
+    AppRuntime.runPromise(SessionPrompt.Service.use((svc) => svc.cancel(child.id))).catch(() => {})
+    AppRuntime.runPromise(SessionPrompt.Service.use((svc) => svc.cancel(input.stuckSessionID))).catch(() => {})
   }
   deadline.signal.addEventListener("abort", onTimeout)
 
   try {
-    await SessionPrompt.prompt({
-      sessionID: child.id,
-      agent: "watchdog",
-      model,
-      system,
-      parts: [
-        {
-          type: "text",
-          text: `Investigate stuck session ${input.stuckSessionID}. Trigger: ${input.trigger.tool} exceeded ${input.trigger.timeout}s timeout (elapsed: ${input.trigger.elapsed}s). Use your tools to query the session state, classify the failure mode, and take appropriate action.`,
-        },
-      ],
-    })
+    await AppRuntime.runPromise(
+      SessionPrompt.Service.use((svc) =>
+        svc.prompt({
+          sessionID: child.id,
+          agent: "watchdog",
+          model,
+          system,
+          parts: [
+            {
+              type: "text",
+              text: `Investigate stuck session ${input.stuckSessionID}. Trigger: ${input.trigger.tool} exceeded ${input.trigger.timeout}s timeout (elapsed: ${input.trigger.elapsed}s). Use your tools to query the session state, classify the failure mode, and take appropriate action.`,
+            },
+          ],
+        }),
+      ),
+    )
 
     deadline.signal.removeEventListener("abort", onTimeout)
     deadline.clearTimeout()
@@ -94,7 +101,7 @@ export async function spawnWatchdog(input: SpawnInput): Promise<WatchdogResult> 
 
     if (deadline.signal.aborted) {
       try {
-        await SessionPrompt.cancel(input.stuckSessionID)
+        await AppRuntime.runPromise(SessionPrompt.Service.use((svc) => svc.cancel(input.stuckSessionID)))
       } catch {
         // best-effort cancel
       }
@@ -106,7 +113,7 @@ export async function spawnWatchdog(input: SpawnInput): Promise<WatchdogResult> 
     }
 
     try {
-      await SessionPrompt.cancel(input.stuckSessionID)
+      await AppRuntime.runPromise(SessionPrompt.Service.use((svc) => svc.cancel(input.stuckSessionID)))
     } catch {
       // best-effort cancel
     }
