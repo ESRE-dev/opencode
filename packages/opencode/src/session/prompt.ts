@@ -440,7 +440,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             return run.promise(
               Effect.gen(function* () {
                 const ctx = context(args, options)
-                const cfg = yield* Config.Service.pipe(Effect.flatMap((svc) => svc.get()))
+                const cfg = yield* (yield* Config.Service).get()
                 const timeouts = cfg.experimental?.watchdog?.timeouts
                 const ms =
                   ((timeouts as any)?.[item.id] ??
@@ -498,7 +498,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           run.promise(
             Effect.gen(function* () {
               const ctx = context(args, opts)
-              const cfg = yield* Config.Service.pipe(Effect.flatMap((svc) => svc.get()))
+              const cfg = yield* (yield* Config.Service).get()
               const timeouts = cfg.experimental?.watchdog?.timeouts
               const ms =
                 ((timeouts as any)?.[key] ??

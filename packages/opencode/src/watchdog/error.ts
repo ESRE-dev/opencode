@@ -1,5 +1,5 @@
-import { NamedError } from "@opencode-ai/util/error"
-import { Effect, Layer, ServiceMap } from "effect"
+import { NamedError } from "@opencode-ai/shared/util/error"
+import { Context, Effect, Layer } from "effect"
 import z from "zod"
 
 export const StreamIdleError = NamedError.create(
@@ -28,7 +28,7 @@ export interface DiagnosticStoreInterface {
   readonly delete: (id: string) => void
 }
 
-export class DiagnosticStore extends ServiceMap.Service<DiagnosticStore, DiagnosticStoreInterface>()(
+export class DiagnosticStore extends Context.Service<DiagnosticStore, DiagnosticStoreInterface>()(
   "@opencode/DiagnosticStore",
 ) {}
 

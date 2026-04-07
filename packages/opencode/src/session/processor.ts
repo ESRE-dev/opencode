@@ -598,7 +598,6 @@ export const layer: Layer.Layer<
               throw err instanceof Error ? err : new Error("Stream idle timeout")
             }
             idle.clear()
-            )
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
@@ -611,7 +610,7 @@ export const layer: Layer.Layer<
             Effect.catchCauseIf(
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) => {
-                const err = Cause.squash(cause)
+                const err = Cause.squash(cause) as Error
                 if (StreamIdleError.isInstance(err) && streamInput.parentSessionID) {
                   try {
                     const secs = err.data.timeout / 1000
