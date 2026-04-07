@@ -251,6 +251,34 @@ export const Info = Schema.Struct({
       mcp_timeout: Schema.optional(PositiveInt).annotate({
         description: "Timeout in milliseconds for model context protocol (MCP) requests",
       }),
+      watchdog: Schema.optional(
+        Schema.Struct({
+          model: Schema.optional(
+            Schema.Struct({
+              providerID: Schema.String,
+              modelID: Schema.String,
+            }),
+          ).annotate({ description: "Model for watchdog agents. Defaults to provider's small/fast model." }),
+          timeouts: Schema.optional(
+            Schema.Struct({
+              stream_idle: Schema.optional(PositiveInt).annotate({
+                description: "LLM stream idle timeout in seconds. Default: 120",
+              }),
+              task: Schema.optional(PositiveInt).annotate({
+                description: "Task tool timeout in seconds. Default: 14400",
+              }),
+              bash: Schema.optional(PositiveInt).annotate({
+                description: "Bash tool timeout in seconds. Default: 120",
+              }),
+              tool_default: Schema.optional(PositiveInt).annotate({
+                description: "Default tool timeout in seconds for tools without a specific entry. Default: 300",
+              }),
+            }),
+          ).annotate({ description: "Per-tool-type timeout thresholds that trigger watchdog investigation." }),
+        }),
+      ).annotate({
+        description: "Intelligent watchdog configuration for stuck session detection and recovery.",
+      }),
     }),
   ),
 })
