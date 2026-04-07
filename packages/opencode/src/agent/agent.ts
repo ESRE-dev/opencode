@@ -231,6 +231,26 @@ export const layer = Layer.effect(
             ),
             prompt: PROMPT_SUMMARY,
           },
+          watchdog: {
+            name: "watchdog",
+            mode: "subagent",
+            native: true,
+            hidden: true,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                watchdog_query: "allow",
+                watchdog_activity: "allow",
+                watchdog_cancel: "allow",
+                watchdog_reprompt: "allow",
+              }),
+              user,
+            ),
+            prompt: "",
+            options: {},
+            steps: 20,
+          },
         }
 
         for (const [key, value] of Object.entries(cfg.agent ?? {})) {
