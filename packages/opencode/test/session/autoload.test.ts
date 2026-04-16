@@ -952,3 +952,152 @@ description: Allowed skill.
     expect(result.action).not.toBe("deny")
   })
 })
+
+// --- Cross-Session Isolation ---
+
+describe("Cross-Session Isolation", () => {
+  test("two sessions under one instance do not share loadedSkills state", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, ".opencode", "skill", "always-on", "SKILL.md"),
+          `---
+name: always-on
+description: Always applies.
+alwaysApply: true
+---
+
+# Always On
+`,
+        )
+        await Bun.write(
+          path.join(dir, ".opencode", "skill", "glob-py", "SKILL.md"),
+          `---
+name: glob-py
+description: Python glob skill.
+globs:
+  - "**/*.py"
+---
+
+# Glob Py
+`,
+        )
+      },
+    })
+
+    const home = process.env.OPENCODE_TEST_HOME
+    process.env.OPENCODE_TEST_HOME = tmp.path
+
+    try {
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const { SkillTool } = await import("../../src/tool/skill")
+          const tool = await SkillTool.init()
+
+          const setA = new Set<string>()
+          const setB = new Set<string>()
+
+          const ctxA = {
+            sessionID: "ses_a" as any,
+            messageID: "" as any,
+            callID: "",
+            agent: "build" as any,
+            abort: AbortSignal.any([]),
+            messages: [],
+            metadata: () => {},
+            extra: { loadedSkills: setA },
+            ask: async () => {},
+          }
+
+          const ctxB = {
+            sessionID: "ses_b" as any,
+            messageID: "" as any,
+            callID: "",
+            agent: "build" as any,
+            abort: AbortSignal.any([]),
+            messages: [],
+            metadata: () => {},
+            extra: { loadedSkills: setB },
+            ask: async () => {},
+          }
+
+          // Load in session A
+          await tool.execute({ name: "always-on" }, ctxA as any)
+          expect(setA.has("always-on")).toBe(true)
+          expect(setB.size).toBe(0)
+
+          // Load in session B
+          await tool.execute({ name: "always-on" }, ctxB as any)
+          expect(setB.has("always-on")).toBe(true)
+          expect(setA.size).toBe(1)
+          expect(setB.size).toBe(1)
+
+          // Load a different skill in session A only
+          await tool.execute({ name: "glob-py" }, ctxA as any)
+          expect(setA.has("glob-py")).toBe(true)
+          expect(setA.size).toBe(2)
+          expect(setB.size).toBe(1)
+          expect(setB.has("glob-py")).toBe(false)
+        },
+      })
+    } finally {
+      process.env.OPENCODE_TEST_HOME = home
+    }
+  })
+})
+
+// --- File-Tool Glob Re-evaluation ---
+
+describe("File-Tool Glob Re-evaluation", () => {
+  test("glob skill promotes from on-demand to auto when touched file matches", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, ".opencode", "skill", "docker-skill", "SKILL.md"),
+          `---
+name: docker-skill
+description: Docker skill.
+globs:
+  - Dockerfile
+  - docker-compose.yml
+  - "**/*.dockerfile"
+---
+
+# Docker Skill
+`,
+        )
+      },
+    })
+
+    const home = process.env.OPENCODE_TEST_HOME
+    process.env.OPENCODE_TEST_HOME = tmp.path
+
+    try {
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const skills = await Skill.all()
+          const skill = skills.find((s) => s.name === "docker-skill")
+          expect(skill).toBeDefined()
+
+          // No matching files → on-demand
+          expect(Skill.classify(skill!, ["src/index.ts", "README.md"])).toBe("on-demand")
+
+          // Dockerfile added → auto
+          expect(Skill.classify(skill!, ["src/index.ts", "README.md", "Dockerfile"])).toBe("auto")
+
+          // docker-compose.yml → auto
+          expect(Skill.classify(skill!, ["docker-compose.yml"])).toBe("auto")
+
+          // Nested .dockerfile → auto
+          expect(Skill.classify(skill!, ["src/app.dockerfile"])).toBe("auto")
+        },
+      })
+    } finally {
+      process.env.OPENCODE_TEST_HOME = home
+    }
+  })
+})
