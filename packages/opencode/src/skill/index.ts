@@ -290,7 +290,7 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
   ].join("\n")
 }
 
-export function classify(skill: typeof Info._type, files: string[]): "auto" | "on-demand" {
+export function classify(skill: Info, files: string[]): "auto" | "on-demand" {
   if (skill.alwaysApply) return "auto"
   for (const pattern of skill.globs) {
     for (const file of files) {

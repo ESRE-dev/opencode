@@ -1,14 +1,21 @@
 import { describe, test, expect, afterEach } from "bun:test"
+import { Effect, Layer, Stream } from "effect"
+import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Skill } from "../../src/skill"
-import { Instance } from "../../src/project/instance"
 import { Git } from "../../src/git"
 import { Ripgrep } from "../../src/file/ripgrep"
-import { tmpdir } from "../fixture/fixture"
+import { Instance } from "../../src/project/instance"
+import { provideTmpdirInstance } from "../fixture/fixture"
+import { testEffect } from "../lib/effect"
 import path from "path"
 
 afterEach(async () => {
   await Instance.disposeAll()
 })
+
+const node = CrossSpawnSpawner.defaultLayer
+
+const it = testEffect(Layer.mergeAll(Skill.defaultLayer, Git.defaultLayer, Ripgrep.defaultLayer, node))
 
 // --- Helpers ---
 
@@ -98,14 +105,15 @@ describe("Skill.Info schema extension", () => {
     expect(result.metadata.version).toBeUndefined()
   })
 
-  test("backward compatibility: existing SKILL.md without new fields", async () => {
-    await using tmp = await tmpdir({
-      git: true,
-      init: async (dir) => {
-        const skill = path.join(dir, ".opencode", "skill", "legacy")
-        await Bun.write(
-          path.join(skill, "SKILL.md"),
-          `---
+  it.live("backward compatibility: existing SKILL.md without new fields", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const skill = path.join(dir, ".opencode", "skill", "legacy")
+          yield* Effect.promise(() =>
+            Bun.write(
+              path.join(skill, "SKILL.md"),
+              `---
 name: legacy-skill
 description: An old skill without new fields.
 ---
@@ -114,31 +122,36 @@ description: An old skill without new fields.
 
 Instructions here.
 `,
-        )
-      },
-    })
+            ),
+          )
+          const home = process.env.OPENCODE_TEST_HOME
+          process.env.OPENCODE_TEST_HOME = dir
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              process.env.OPENCODE_TEST_HOME = home
+            }),
+          )
+          const svc = yield* Skill.Service
+          const skills = yield* svc.all()
+          const legacy = skills.find((s) => s.name === "legacy-skill")
+          expect(legacy).toBeDefined()
+          expect(legacy!.alwaysApply).toBe(false)
+          expect(legacy!.globs).toEqual([])
+          expect(legacy!.metadata).toEqual({ sources: [] })
+        }),
+      { git: true },
+    ),
+  )
 
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const skills = await Skill.all()
-        const legacy = skills.find((s) => s.name === "legacy-skill")
-        expect(legacy).toBeDefined()
-        expect(legacy!.alwaysApply).toBe(false)
-        expect(legacy!.globs).toEqual([])
-        expect(legacy!.metadata).toEqual({ sources: [] })
-      },
-    })
-  })
-
-  test("parses SKILL.md with all new frontmatter fields", async () => {
-    await using tmp = await tmpdir({
-      git: true,
-      init: async (dir) => {
-        const skill = path.join(dir, ".opencode", "skill", "full")
-        await Bun.write(
-          path.join(skill, "SKILL.md"),
-          `---
+  it.live("parses SKILL.md with all new frontmatter fields", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const skill = path.join(dir, ".opencode", "skill", "full")
+          yield* Effect.promise(() =>
+            Bun.write(
+              path.join(skill, "SKILL.md"),
+              `---
 name: full-skill
 description: A skill with all fields.
 alwaysApply: true
@@ -156,23 +169,27 @@ metadata:
 
 Complete instructions.
 `,
-        )
-      },
-    })
-
-    await Instance.provide({
-      directory: tmp.path,
-      fn: async () => {
-        const skills = await Skill.all()
-        const full = skills.find((s) => s.name === "full-skill")
-        expect(full).toBeDefined()
-        expect(full!.alwaysApply).toBe(true)
-        expect(full!.globs).toEqual(["**/*.py", "pyproject.toml"])
-        expect(full!.metadata.version).toBe("2.1.0")
-        expect(full!.metadata.sources).toEqual(["https://docs.example.com", "https://api.example.com"])
-      },
-    })
-  })
+            ),
+          )
+          const home = process.env.OPENCODE_TEST_HOME
+          process.env.OPENCODE_TEST_HOME = dir
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              process.env.OPENCODE_TEST_HOME = home
+            }),
+          )
+          const svc = yield* Skill.Service
+          const skills = yield* svc.all()
+          const full = skills.find((s) => s.name === "full-skill")
+          expect(full).toBeDefined()
+          expect(full!.alwaysApply).toBe(true)
+          expect(full!.globs).toEqual(["**/*.py", "pyproject.toml"])
+          expect(full!.metadata.version).toBe("2.1.0")
+          expect(full!.metadata.sources).toEqual(["https://docs.example.com", "https://api.example.com"])
+        }),
+      { git: true },
+    ),
+  )
 })
 
 // --- Property-Based Tests ---
@@ -237,7 +254,6 @@ describe("Property 3: Glob Classification Correctness", () => {
       const name = str(8)
       const file = `${dir}/${name}.${ext}`
 
-      // Case 1: matching file — glob pattern matches the generated file
       const skill = Skill.Info.parse({
         name: str(8),
         description: str(12),
@@ -248,7 +264,6 @@ describe("Property 3: Glob Classification Correctness", () => {
       })
       expect(Skill.classify(skill, [file])).toBe("auto")
 
-      // Case 2: non-matching file — pick a different extension
       const other = exts.filter((e) => e !== ext)
       const wrongExt = other[rand(other.length)]
       const wrongFile = `${str(6)}/${str(8)}.${wrongExt}`
@@ -331,83 +346,93 @@ describe("classify edge cases", () => {
 // --- Workspace Scanning Tests ---
 
 describe("workspace scanning", () => {
-  test("git ls-files returns tracked files in a git repo", async () => {
-    await using tmp = await tmpdir({
-      git: true,
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "src/index.ts"), "export {}")
-        await Bun.write(path.join(dir, "pyproject.toml"), "[project]")
-        await Bun.write(path.join(dir, ".env"), "SECRET=x")
-        const proc = Bun.spawn(["git", "add", "."], { cwd: dir })
-        await proc.exited
-        const commit = Bun.spawn(["git", "commit", "-m", "add files", "--no-gpg-sign"], { cwd: dir })
-        await commit.exited
-      },
-    })
+  it.live("git ls-files returns tracked files in a git repo", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await Bun.write(path.join(dir, "src/index.ts"), "export {}")
+            await Bun.write(path.join(dir, "pyproject.toml"), "[project]")
+            await Bun.write(path.join(dir, ".env"), "SECRET=x")
+            const proc = Bun.spawn(["git", "add", "."], { cwd: dir })
+            await proc.exited
+            const commit = Bun.spawn(["git", "commit", "-m", "add files", "--no-gpg-sign"], { cwd: dir })
+            await commit.exited
+          })
+          const git = yield* Git.Service
+          const result = yield* git.run(["ls-files", "-z"], { cwd: dir })
+          expect(result.exitCode).toBe(0)
+          const files = result
+            .text()
+            .split("\0")
+            .filter((f) => f.length > 0)
+          expect(files).toContain("src/index.ts")
+          expect(files).toContain("pyproject.toml")
+          expect(files).toContain(".env")
+        }),
+      { git: true },
+    ),
+  )
 
-    const result = await Git.run(["ls-files", "-z"], { cwd: tmp.path })
-    expect(result.exitCode).toBe(0)
-    const files = result
-      .text()
-      .split("\0")
-      .filter((f) => f.length > 0)
-    expect(files).toContain("src/index.ts")
-    expect(files).toContain("pyproject.toml")
-    expect(files).toContain(".env")
-  })
+  it.live("git ls-files returns empty for repo with no tracked files beyond initial commit", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const git = yield* Git.Service
+          const result = yield* git.run(["ls-files", "-z"], { cwd: dir })
+          expect(result.exitCode).toBe(0)
+          const files = result
+            .text()
+            .split("\0")
+            .filter((f) => f.length > 0)
+          expect(Array.isArray(files)).toBe(true)
+        }),
+      { git: true },
+    ),
+  )
 
-  test("git ls-files returns empty for repo with no tracked files beyond initial commit", async () => {
-    await using tmp = await tmpdir({ git: true })
+  it.live("Ripgrep.files returns files from a non-git directory", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(async () => {
+          await Bun.write(path.join(dir, "main.py"), "print('hello')")
+          await Bun.write(path.join(dir, "lib/util.py"), "def foo(): pass")
+        })
+        const rg = yield* Ripgrep.Service
+        const files = yield* rg.files({ cwd: dir, maxDepth: 3 }).pipe(
+          Stream.runCollect,
+          Effect.map((c) => [...c]),
+        )
+        expect(files.length).toBeGreaterThanOrEqual(2)
+        expect(files.some((f) => f.endsWith("main.py"))).toBe(true)
+        expect(files.some((f) => f.includes("util.py"))).toBe(true)
+      }),
+    ),
+  )
 
-    const result = await Git.run(["ls-files", "-z"], { cwd: tmp.path })
-    expect(result.exitCode).toBe(0)
-    const files = result
-      .text()
-      .split("\0")
-      .filter((f) => f.length > 0)
-    // tmpdir with git: true creates an initial commit — may have .gitkeep or be empty
-    // The key invariant: exitCode is 0 and result is parseable
-    expect(Array.isArray(files)).toBe(true)
-  })
+  it.live("Ripgrep.files returns empty for empty directory", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const rg = yield* Ripgrep.Service
+        const files = yield* rg.files({ cwd: dir, maxDepth: 3 }).pipe(
+          Stream.runCollect,
+          Effect.map((c) => [...c]),
+        )
+        expect(files).toEqual([])
+      }),
+    ),
+  )
 
-  test("Ripgrep.files returns files from a non-git directory", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "main.py"), "print('hello')")
-        await Bun.write(path.join(dir, "lib/util.py"), "def foo(): pass")
-      },
-    })
-
-    const files: string[] = []
-    for await (const file of Ripgrep.files({ cwd: tmp.path, maxDepth: 3 })) {
-      files.push(file)
-    }
-    expect(files.length).toBeGreaterThanOrEqual(2)
-    expect(files.some((f) => f.endsWith("main.py"))).toBe(true)
-    expect(files.some((f) => f.includes("util.py"))).toBe(true)
-  })
-
-  test("Ripgrep.files returns empty for empty directory", async () => {
-    await using tmp = await tmpdir()
-
-    const files: string[] = []
-    for await (const file of Ripgrep.files({ cwd: tmp.path, maxDepth: 3 })) {
-      files.push(file)
-    }
-    expect(files).toEqual([])
-  })
-
-  test("git ls-files fails gracefully for non-git directory", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "file.txt"), "content")
-      },
-    })
-
-    const result = await Git.run(["ls-files", "-z"], { cwd: tmp.path })
-    // Git.run never rejects — returns exitCode: 128 for non-git dirs
-    expect(result.exitCode).not.toBe(0)
-  })
+  it.live("git ls-files fails gracefully for non-git directory", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => Bun.write(path.join(dir, "file.txt"), "content"))
+        const git = yield* Git.Service
+        const result = yield* git.run(["ls-files", "-z"], { cwd: dir })
+        expect(result.exitCode).not.toBe(0)
+      }),
+    ),
+  )
 })
 
 // --- Property 6: File Tool Tracking ---
@@ -474,52 +499,54 @@ describe("Property 8: Non-Matching File No-Op", () => {
 // --- Property 11: Cache Stability ---
 
 describe("Property 11: Cache Stability", () => {
-  test("git ls-files returns same result on consecutive calls", async () => {
-    await using tmp = await tmpdir({
-      git: true,
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "a.ts"), "export {}")
-        await Bun.write(path.join(dir, "b.py"), "pass")
-        await Bun.write(path.join(dir, "c/d.go"), "package main")
-        const proc = Bun.spawn(["git", "add", "."], { cwd: dir })
-        await proc.exited
-        const commit = Bun.spawn(["git", "commit", "-m", "files", "--no-gpg-sign"], { cwd: dir })
-        await commit.exited
-      },
-    })
+  it.live("git ls-files returns same result on consecutive calls", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await Bun.write(path.join(dir, "a.ts"), "export {}")
+            await Bun.write(path.join(dir, "b.py"), "pass")
+            await Bun.write(path.join(dir, "c/d.go"), "package main")
+            const proc = Bun.spawn(["git", "add", "."], { cwd: dir })
+            await proc.exited
+            const commit = Bun.spawn(["git", "commit", "-m", "files", "--no-gpg-sign"], { cwd: dir })
+            await commit.exited
+          })
+          const git = yield* Git.Service
+          const run = Effect.fnUntraced(function* () {
+            const result = yield* git.run(["ls-files", "-z"], { cwd: dir })
+            return result
+              .text()
+              .split("\0")
+              .filter((f) => f.length > 0)
+              .sort()
+          })
+          const first = yield* run()
+          const second = yield* run()
+          expect(first).toEqual(second)
+        }),
+      { git: true },
+    ),
+  )
 
-    const run = async () => {
-      const result = await Git.run(["ls-files", "-z"], { cwd: tmp.path })
-      return result
-        .text()
-        .split("\0")
-        .filter((f) => f.length > 0)
-        .sort()
-    }
-
-    const first = await run()
-    const second = await run()
-    expect(first).toEqual(second)
-  })
-
-  test("Ripgrep.files returns same result on consecutive calls", async () => {
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(path.join(dir, "x.ts"), "1")
-        await Bun.write(path.join(dir, "y.py"), "2")
-      },
-    })
-
-    const run = async () => {
-      const files: string[] = []
-      for await (const file of Ripgrep.files({ cwd: tmp.path, maxDepth: 3 })) {
-        files.push(file)
-      }
-      return files.sort()
-    }
-
-    const first = await run()
-    const second = await run()
-    expect(first).toEqual(second)
-  })
+  it.live("Ripgrep.files returns same result on consecutive calls", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(async () => {
+          await Bun.write(path.join(dir, "x.ts"), "1")
+          await Bun.write(path.join(dir, "y.py"), "2")
+        })
+        const rg = yield* Ripgrep.Service
+        const run = Effect.fnUntraced(function* () {
+          return yield* rg.files({ cwd: dir, maxDepth: 3 }).pipe(
+            Stream.runCollect,
+            Effect.map((c) => [...c].sort()),
+          )
+        })
+        const first = yield* run()
+        const second = yield* run()
+        expect(first).toEqual(second)
+      }),
+    ),
+  )
 })
