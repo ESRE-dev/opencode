@@ -124,6 +124,7 @@ export interface Interface {
   }) => Effect.Effect<ReadonlyArray<Answer>, RejectedError>
   readonly reply: (input: { requestID: QuestionID; answers: ReadonlyArray<Answer> }) => Effect.Effect<void>
   readonly reject: (requestID: QuestionID) => Effect.Effect<void>
+  readonly rejectSession: (sessionID: SessionID) => Effect.Effect<void>
   readonly list: () => Effect.Effect<ReadonlyArray<Request>>
 }
 
@@ -220,7 +221,21 @@ export const layer = Layer.effect(
       return Array.from(pending.values(), (x) => x.info)
     })
 
-    return Service.of({ ask, reply, reject, list })
+    const rejectSession = Effect.fn("Question.rejectSession")(function* (sessionID: SessionID) {
+      const pending = (yield* InstanceState.get(state)).pending
+      for (const [id, item] of pending.entries()) {
+        if (item.info.sessionID !== sessionID) continue
+        pending.delete(id)
+        log.info("rejecting for cancelled session", { requestID: id, sessionID })
+        yield* bus.publish(Event.Rejected, {
+          sessionID: item.info.sessionID,
+          requestID: item.info.id,
+        })
+        yield* Deferred.fail(item.deferred, new RejectedError())
+      }
+    })
+
+    return Service.of({ ask, reply, reject, rejectSession, list })
   }),
 )
 

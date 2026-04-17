@@ -9,6 +9,8 @@ export type Err = ReturnType<NamedError["toObject"]>
 // literal error string kind of sucks, but it is the simplest for now.
 export const GO_UPSELL_MESSAGE = "Free usage exceeded, subscribe to Go https://opencode.ai/go"
 
+export const MAX_RETRIES = 12
+
 export const RETRY_INITIAL_DELAY = 2000
 export const RETRY_BACKOFF_FACTOR = 2
 export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
@@ -112,6 +114,7 @@ export function policy(opts: {
       const error = opts.parse(meta.input)
       const message = retryable(error)
       if (!message) return Cause.done(meta.attempt)
+      if (meta.attempt >= MAX_RETRIES) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
         const wait = delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)
         const now = yield* Clock.currentTimeMillis
