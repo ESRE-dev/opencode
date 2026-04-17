@@ -19,6 +19,7 @@ Usage notes:
 4. The agent's outputs should generally be trusted
 5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent. Tell it how to verify its work if possible (e.g., relevant test commands).
 6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+7. Each task has a safety timeout to catch zombie/stalled agents. The default is generous (4 hours) and the minimum is 30 minutes. You almost never need to set a timeout explicitly — only set one if you have a specific reason. If a task times out, it returns an error with the task_id. You should retry timed-out tasks by passing the task_id to resume the session. Retry up to 5 times before reporting failure to the user.
 
 Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
 
