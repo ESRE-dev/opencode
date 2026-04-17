@@ -16,6 +16,7 @@ import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect, Layer, Context } from "effect"
 import { InstanceState } from "@/effect"
 import { isOverflow as overflow } from "./overflow"
+import { Todo } from "./todo"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -26,6 +27,12 @@ export const Event = {
       sessionID: SessionID.zod,
     }),
   ),
+}
+
+export function formatTodos(todos: Todo.Info[]): string | undefined {
+  if (todos.length === 0) return undefined
+  const items = todos.map((t) => `- [${t.status}] (${t.priority}) ${t.content}`).join("\n")
+  return `\n\n## Current Task List\nThe agent is tracking the following tasks (persisted in the database — these survive compaction):\n${items}`
 }
 
 export const PRUNE_MINIMUM = 20_000
@@ -66,6 +73,7 @@ export const layer: Layer.Layer<
   | Plugin.Service
   | SessionProcessor.Service
   | Provider.Service
+  | Todo.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -76,6 +84,7 @@ export const layer: Layer.Layer<
     const plugin = yield* Plugin.Service
     const processors = yield* SessionProcessor.Service
     const provider = yield* Provider.Service
+    const todo = yield* Todo.Service
 
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: MessageV2.Assistant["tokens"]
@@ -182,7 +191,7 @@ export const layer: Layer.Layer<
         { sessionID: input.sessionID, agent: userMessage.agent },
         { context: [], prompt: undefined },
       )
-      const defaultPrompt = `Provide a detailed prompt for continuing our conversation above.
+      let defaultPrompt = `Provide a detailed prompt for continuing our conversation above.
 Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do next.
 The summary that you construct will be used so that another agent can read it and continue the work.
 Do not call any tools. Respond only with the summary text.
@@ -215,6 +224,12 @@ When constructing the summary, try to stick to this template:
 
 [Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the path to the directory.]
 ---`
+
+      const todos = yield* todo.get(input.sessionID)
+      const section = formatTodos(todos)
+      if (section) {
+        defaultPrompt += section
+      }
 
       const prompt = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
       // Resolve the source agent to preserve its identity during compaction
@@ -456,6 +471,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(SessionProcessor.defaultLayer),
     Layer.provide(Agent.defaultLayer),
     Layer.provide(Plugin.defaultLayer),
+    Layer.provide(Todo.defaultLayer),
     Layer.provide(Bus.layer),
     Layer.provide(Config.defaultLayer),
   ),
