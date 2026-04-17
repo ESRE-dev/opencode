@@ -134,7 +134,7 @@ export function description(exclude?: Set<string>): Tool.DynamicDescription {
         "",
         Skill.fmt(list, { verbose: false }),
       ].join("\n")
-    })
+    }).pipe(Effect.provide(Skill.defaultLayer))
 }
 
 export const SkillDescription: Tool.DynamicDescription = description()
