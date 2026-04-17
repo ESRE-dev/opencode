@@ -7,8 +7,11 @@ import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "../config"
-import { Cause, Effect, Exit } from "effect"
+import { Effect } from "effect"
 import { abortAfterAny } from "@/util/abort"
+import { WATCHDOG_TIMEOUT_DEFAULTS, diagnostics } from "@/watchdog/error"
+import { spawnWatchdog } from "@/watchdog/spawn"
+import { errorMessage } from "@/util/error"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): void
@@ -16,8 +19,8 @@ export interface TaskPromptOps {
   prompt(input: SessionPrompt.PromptInput): Effect.Effect<MessageV2.WithParts>
 }
 
-const DEFAULT_TIMEOUT = 14_400_000 // 4 hours — zombie/stall protection, not performance pressure
-const MIN_TIMEOUT = 1_800_000 // 30 minutes — floor for LLM-specified values
+const DEFAULT_TIMEOUT = 14_400_000
+const MIN_TIMEOUT = 30_000
 
 const id = "task"
 
@@ -53,85 +56,11 @@ const parameters = z.object({
   command: z.string().describe("The command that triggered this task").optional(),
   timeout: z
     .number()
-    .optional()
-    .describe(
-      "Optional timeout in seconds for zombie/stall protection. Default: 4 hours. Minimum: 30 minutes. You almost never need to set this — only override if you have a specific reason.",
-    ),
+    .int()
+    .positive()
+    .describe("Optional timeout in seconds for zombie/stall protection. Default: 4 hours. Minimum: 30 minutes.")
+    .optional(),
 })
-
-function childText(
-  result: MessageV2.WithParts,
-  sessionId: string,
-  sessions: Session.Interface,
-  opts?: { skipAbort?: boolean; parentAborted?: boolean; deadlineAborted?: boolean },
-): Effect.Effect<string> {
-  if (result.info.role !== "assistant") return Effect.succeed("")
-  const error = result.info.error
-  if (error?.name === "MessageAbortedError" && !opts?.skipAbort) {
-    if (opts?.deadlineAborted) return Effect.succeed("")
-    if (opts?.parentAborted) return Effect.succeed("Task was cancelled by user.")
-    return Effect.succeed(
-      [
-        `WATCHDOG: Subagent session (${sessionId}) was killed — tool execution exceeded maximum allowed duration.`,
-        `task_id: ${sessionId}`,
-        "",
-        "The subagent stalled (likely waiting on an external resource or internal deadlock).",
-        "Recommended: retry this task with a simpler or more focused prompt.",
-        "You can resume by passing the task_id above.",
-      ].join("\n"),
-    )
-  }
-  const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
-  if (text) return Effect.succeed(text)
-  if (!error) return Effect.succeed("")
-
-  return Effect.gen(function* () {
-    // The child errored with no text output. Recover substantive work from
-    // the session history so the parent doesn't lose everything.
-    const lines: string[] = []
-
-    // 1. Collect completed tool outputs from the errored message itself
-    for (const p of result.parts) {
-      if (p.type !== "tool" || p.state.status !== "completed") continue
-      lines.push(`[${p.state.title}]\n${p.state.output}`)
-    }
-
-    // 2. Walk backwards through earlier messages for the last substantive text
-    if (!lines.length) {
-      const msgs = yield* sessions.messages({ sessionID: SessionID.make(sessionId), limit: 10 })
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        const m = msgs[i]
-        if (m.info.role !== "assistant" || m.info.id === result.info.id) continue
-        const prior = m.parts.findLast((x) => x.type === "text")?.text
-        if (prior) {
-          lines.push(prior)
-          break
-        }
-      }
-    }
-
-    const msg = error.data && "message" in error.data ? (error.data as { message: string }).message : error.name
-    const code =
-      error.data && "statusCode" in error.data ? ` (status ${(error.data as { statusCode: number }).statusCode})` : ""
-    const header = `ERROR: The subagent session (${sessionId}) failed with: ${error.name}${code}\n${msg}`
-
-    if (!lines.length) {
-      return [header, "", "You can retry this task by passing the task_id above, or try a different approach."].join(
-        "\n",
-      )
-    }
-
-    return [
-      "NOTE: The subagent errored after completing some work. Partial output below:",
-      "",
-      ...lines,
-      "",
-      header,
-      "",
-      "You can retry this task by passing the task_id above, or try a different approach.",
-    ].join("\n")
-  })
-}
 
 export const TaskTool = Tool.define(
   id,
@@ -252,21 +181,14 @@ export const TaskTool = Tool.define(
         ops.cancel(nextSession.id)
       }
 
-      const raw = params.timeout ? params.timeout * 1000 : DEFAULT_TIMEOUT
-      // MIN_TIMEOUT guards against LLM-specified timeouts that are too short.
-      const ms = params.timeout ? Math.max(MIN_TIMEOUT, raw) : raw
-      const deadline = abortAfterAny(ms, ctx.abort)
-
       return yield* Effect.acquireUseRelease(
         Effect.sync(() => {
           ctx.abort.addEventListener("abort", cancel)
-          deadline.signal.addEventListener("abort", cancel)
         }),
         () =>
           Effect.gen(function* () {
             const parts = yield* ops.resolvePromptParts(params.prompt)
-
-            const exit = yield* ops
+            const outcome = yield* ops
               .prompt({
                 messageID,
                 sessionID: nextSession.id,
@@ -284,157 +206,12 @@ export const TaskTool = Tool.define(
                 },
                 parts,
               })
-              .pipe(Effect.exit)
+              .pipe(
+                Effect.map((value) => ({ ok: true as const, value })),
+                Effect.catch((error) => Effect.succeed({ ok: false as const, error })),
+              )
 
-            deadline.clearTimeout()
-
-            if (Exit.isFailure(exit)) {
-              // If parent was aborted (user Ctrl+C), re-throw
-              if (ctx.abort.aborted) return yield* Effect.failCause(exit.cause)
-              // If the deadline fired, it's a real timeout
-              if (deadline.signal.aborted) {
-                cancel()
-                const limit = Math.round(ms / 1000)
-                return {
-                  title: params.description,
-                  metadata: {
-                    sessionId: nextSession.id,
-                    model,
-                  },
-                  output: [
-                    `TIMEOUT: Task exceeded ${limit}s deadline and was cancelled.`,
-                    `task_id: ${nextSession.id}`,
-                    "",
-                    "You can resume this task by passing the task_id above.",
-                    "Recommended: retry with a simpler or more focused prompt. Break large tasks into smaller sub-tasks.",
-                  ].join("\n"),
-                }
-              }
-              // Non-timeout, non-abort error — surface the actual failure
-              cancel()
-              const reason = Cause.pretty(exit.cause)
-              return {
-                title: params.description,
-                metadata: {
-                  sessionId: nextSession.id,
-                  model,
-                },
-                output: [
-                  `ERROR: Task failed: ${reason}`,
-                  `task_id: ${nextSession.id}`,
-                  "",
-                  "You can retry this task by passing the task_id above, or try a different approach.",
-                ].join("\n"),
-              }
-            }
-
-            const result = exit.value
-
-            // Detect timeout: deadline fired after prompt returned but before we got here
-            if (deadline.signal.aborted && !ctx.abort.aborted) {
-              const limit = Math.round(ms / 1000)
-              const partial = yield* childText(result, nextSession.id, sessions, { skipAbort: true })
-              return {
-                title: params.description,
-                metadata: {
-                  sessionId: nextSession.id,
-                  model,
-                },
-                output: [
-                  `TIMEOUT: Task exceeded ${limit}s deadline and was cancelled.`,
-                  `task_id: ${nextSession.id}`,
-                  "",
-                  ...(partial ? ["Partial output recovered from the timed-out session:", "", partial, ""] : []),
-                  "You can resume this task by passing the task_id above.",
-                  "Recommended: retry with a simpler or more focused prompt. Break large tasks into smaller sub-tasks.",
-                ].join("\n"),
-              }
-            }
-
-            const text = yield* childText(result, nextSession.id, sessions, {
-              parentAborted: ctx.abort.aborted,
-              deadlineAborted: deadline.signal.aborted,
-            })
-
-            const result = yield* promptEffect.pipe(
-              Effect.catchDefect((e) => {
-                // If parent was aborted (user Ctrl+C), re-throw
-                if (ctx.abort.aborted) return Effect.die(e)
-                // If the deadline fired, it's a real timeout
-                if (deadline.signal.aborted) {
-                  cancel()
-                  return Effect.succeed(undefined)
-                }
-                // Non-timeout, non-abort error — surface the actual failure
-                cancel()
-                const reason = e instanceof Error ? e.message : String(e)
-                return Effect.succeed({ _error: reason } as const)
-              }),
-            )
-
-            deadline.clearTimeout()
-
-            // Timeout: deadline fired but parent wasn't cancelled
-            if (result === undefined) {
-              const limit = Math.round(ms / 1000)
-              return {
-                title: params.description,
-                metadata: {
-                  sessionId: nextSession.id,
-                  model,
-                },
-                output: [
-                  `TIMEOUT: Task exceeded ${limit}s deadline and was cancelled.`,
-                  `task_id: ${nextSession.id}`,
-                  "",
-                  "You can resume this task by passing the task_id above.",
-                  "Recommended: retry with a simpler or more focused prompt. Break large tasks into smaller sub-tasks.",
-                ].join("\n"),
-              }
-            }
-
-            // Non-timeout error
-            if ("_error" in result) {
-              return {
-                title: params.description,
-                metadata: {
-                  sessionId: nextSession.id,
-                  model,
-                },
-                output: [
-                  `ERROR: Task failed: ${result._error}`,
-                  `task_id: ${nextSession.id}`,
-                  "",
-                  "You can retry this task by passing the task_id above, or try a different approach.",
-                ].join("\n"),
-              }
-            }
-
-            // Detect timeout: deadline fired after prompt returned but before we got here
-            if (deadline.signal.aborted && !ctx.abort.aborted) {
-              const limit = Math.round(ms / 1000)
-              const partial = yield* childText(sessions, result, nextSession.id, { skipAbort: true })
-              return {
-                title: params.description,
-                metadata: {
-                  sessionId: nextSession.id,
-                  model,
-                },
-                output: [
-                  `TIMEOUT: Task exceeded ${limit}s deadline and was cancelled.`,
-                  `task_id: ${nextSession.id}`,
-                  "",
-                  ...(partial ? ["Partial output recovered from the timed-out session:", "", partial, ""] : []),
-                  "You can resume this task by passing the task_id above.",
-                  "Recommended: retry with a simpler or more focused prompt. Break large tasks into smaller sub-tasks.",
-                ].join("\n"),
-              }
-            }
-
-            const text = yield* childText(sessions, result, nextSession.id, {
-              parentAborted: ctx.abort.aborted,
-              deadlineAborted: deadline.signal.aborted,
-            })
+            const text = childText(nextSession.id, outcome)
 
             return {
               title: params.description,
@@ -453,8 +230,6 @@ export const TaskTool = Tool.define(
           }),
         () =>
           Effect.sync(() => {
-            deadline.clearTimeout()
-            deadline.signal.removeEventListener("abort", cancel)
             ctx.abort.removeEventListener("abort", cancel)
             deadline.signal.removeEventListener("abort", onDeadline)
             deadline.clearTimeout()
