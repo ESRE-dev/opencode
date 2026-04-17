@@ -53,7 +53,7 @@ type ReadMetadata = {
   todos: Todo.Info[]
 }
 
-export const TodoReadTool = Tool.defineEffect<typeof empty, ReadMetadata, Todo.Service>(
+export const TodoReadTool = Tool.define<typeof empty, ReadMetadata, Todo.Service>(
   "todoread",
   Effect.gen(function* () {
     const todo = yield* Todo.Service
@@ -61,23 +61,24 @@ export const TodoReadTool = Tool.defineEffect<typeof empty, ReadMetadata, Todo.S
     return {
       description: DESCRIPTION_READ,
       parameters: empty,
-      async execute(_params: z.infer<typeof empty>, ctx: Tool.Context<ReadMetadata>) {
-        await ctx.ask({
-          permission: "todoread",
-          patterns: ["*"],
-          always: ["*"],
-          metadata: {},
-        })
+      execute: (_params: z.infer<typeof empty>, ctx: Tool.Context<ReadMetadata>) =>
+        Effect.gen(function* () {
+          yield* ctx.ask({
+            permission: "todoread",
+            patterns: ["*"],
+            always: ["*"],
+            metadata: {},
+          })
 
-        const todos = await todo.get(ctx.sessionID).pipe(Effect.runPromise)
-        return {
-          title: `${todos.filter((x) => x.status !== "completed").length} todos`,
-          metadata: {
-            todos,
-          },
-          output: JSON.stringify(todos, null, 2),
-        }
-      },
-    } satisfies Tool.Def<typeof empty, ReadMetadata>
+          const todos = yield* todo.get(ctx.sessionID)
+          return {
+            title: `${todos.filter((x) => x.status !== "completed").length} todos`,
+            metadata: {
+              todos,
+            },
+            output: JSON.stringify(todos, null, 2),
+          }
+        }),
+    } satisfies Tool.DefWithoutID<typeof empty, ReadMetadata>
   }),
 )
