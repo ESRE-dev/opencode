@@ -46,62 +46,122 @@ into code branches.**
 
 Archive of previous integration work. Mine for features not yet extracted
 to `local/*` branches. Use `git show origin/dev-safe:<path>` to inspect
-files.
+files. **Superseded by the `local/*` approach — kept only as a safety
+archive. Not part of the sync cycle.**
 
-### `origin/pr/*` and `origin/feature/*` — upstream PR sources
+### `origin/pr/*` — upstream PR candidates
 
 Source branches for open upstream PRs (e.g. `origin/pr/session-watchdog`
-→ PR #20104). **Do not delete while PRs are open.**
+→ PR #20104). **Do not delete while PRs are open.** These are simpler,
+upstreamable versions of features that may also exist in richer form as
+`local/*` branches. `rebase-branches.sh` auto-discovers and rebases any
+local `pr/*` branches alongside the manifest.
+
+> **Note:** `local/session-watchdog` is a PR-only branch
+> (`origin/pr/session-watchdog`). It is **not** in `.local-branches`
+> and is **not** merged into `local-dev`. The richer
+> `local/intelligent-session-watchdog` supersedes it for local use.
 
 ## The Sync Cycle
 
-Run `scripts/sync.sh` or execute manually:
+Two scripts automate the cycle. Both live on the `meta` branch and are
+accessible from the maintenance worktree (`../opencode-maintain/`).
 
-1.  **Fetch upstream**
+### Prerequisites
 
-    git fetch upstream
+```bash
+# Enable rerere for automatic conflict memory
+git config rerere.enabled true
+git config rerere.autoupdate true
 
-2.  **Reset dev**
+# Create maintenance worktree (one-time setup)
+git worktree add ../opencode-maintain meta
+```
 
-    git switch dev && git reset --hard upstream/dev
+### Step 1: Rebase branches
 
-3.  **Rebase each topic branch**
+```bash
+../opencode-maintain/scripts/rebase-branches.sh
+```
 
-        git switch local/<name> && git rebase dev
+This script:
 
-    Fix conflicts per-topic. Each branch should apply cleanly against the
-    latest upstream.
+- Fetches `upstream`
+- Reads `.local-branches` manifest + auto-discovers local `pr/*` branches
+- Creates local tracking branches from `origin/*` when needed
+- Skips branches already on `upstream/dev` or checked out in worktrees
+- Uses a temp worktree — **never touches your active checkouts**
+- Leverages `git rerere` to auto-resolve previously seen conflicts
+- On unresolvable conflict: stops with exact recovery instructions
 
-4.  **Rebuild local-dev**
+Use `--dry-run` to preview without changes.
 
-        git switch -C local-dev dev
-        git merge --no-ff local/<name> -m "integrate: local/<name>"
+### Step 2: Rebuild local-dev
 
-    Repeat the merge for every `local/*` branch.
+```bash
+../opencode-maintain/scripts/rebuild-local-dev.sh
+```
 
-5.  **Push (optional)**
+This script:
 
-        git push origin dev --force-with-lease
+- Verifies all manifest branches exist and are rebased onto `upstream/dev`
+- Hard-resets `local-dev` to `upstream/dev`
+- Merges each `.local-branches` entry with `--no-ff` in listed order
+- Uses a temp worktree — **never touches your active checkouts**
+- On merge conflict: aborts, resets `local-dev`, exits with diagnosis
 
-    Syncs the fork's `dev` ref with upstream.
+Use `--dry-run` to preview the merge order.
+
+### Step 3: Push (optional)
+
+```bash
+git push origin local-dev --force-with-lease
+git push origin dev --force-with-lease
+```
+
+### Legacy
+
+`scripts/sync.sh` is the original monolithic script. It is **deprecated**
+— it switches branches on your active worktree and lacks conflict
+recovery. Kept for reference only.
 
 ## Current local/\* Branches
 
-_As of 2026-04-05._
+_As of 2026-04-17._
 
-| Branch                            | Commits | Purpose                                                                      |
-| --------------------------------- | ------- | ---------------------------------------------------------------------------- |
-| `local/build-command`             | 1       | /build slash command for binary compile and sign                             |
-| `local/cancel-propagation`        | 1       | Cancel/teardown correctness, abort-safe processing                           |
-| `local/compaction-agent-identity` | 3       | Preserve agent identity across compaction + prevent tool-call hallucinations |
-| `local/compaction-todo`           | 1       | Inject TODO state into compaction summarizer prompt                          |
-| `local/docs`                      | 1       | 17-chapter tech stack guide, Starlight site, research notes                  |
-| `local/misc`                      | 1       | gitignore, TodoReadTool, OPENCODE_SESSION_ID env var                         |
-| `local/provider-fallback`         | 2       | Automatic model fallback on transient errors + Copilot/cross-provider fixes  |
-| `local/session-watchdog`          | 2       | Watchdog for stuck tools/sessions + idle detection + cancel targeting        |
-| `local/subagent-hardening`        | 1       | Subagent error handling, permissions, question denial, webfetch fixes        |
-| `local/tool-timeout`              | 1       | Configurable timeout protection for all tool executions                      |
-| `local/tui-navigation`            | 1       | Multi-level keyboard nav through agent tree, interrupt UX                    |
+Branches are listed in merge order (same as `.local-branches` manifest).
+
+| Branch                               | Commits | In local-dev | Purpose                                                                      |
+| ------------------------------------ | ------- | ------------ | ---------------------------------------------------------------------------- |
+| `local/compaction-agent-identity`    | 3       | ✅           | Preserve agent identity across compaction + prevent tool-call hallucinations |
+| `local/subagent-hardening`           | 1       | ✅           | Subagent error handling, permissions, question denial, webfetch fixes        |
+| `local/compaction-todo`              | 1       | ✅           | Inject TODO state into compaction summarizer prompt                          |
+| `local/cancel-propagation`           | 1       | ✅           | Cancel/teardown correctness, abort-safe processing                           |
+| `local/build-command`                | 1       | ✅           | /build slash command for binary compile and sign                             |
+| `local/tool-timeout`                 | 1       | ✅           | Configurable timeout protection for all tool executions                      |
+| `local/provider-fallback`            | 2       | ✅           | Automatic model fallback on transient errors + Copilot/cross-provider fixes  |
+| `local/tui-navigation`               | 1       | ✅           | Multi-level keyboard nav through agent tree, interrupt UX                    |
+| `local/intelligent-session-watchdog` | 6       | ✅           | Full watchdog package: stuck tools, idle detection, cancel targeting         |
+| `local/skill-preamble`               | 3       | ✅           | Skill preamble frontmatter and auto-load with Effect service pattern         |
+| `local/docs`                         | 1       | ✅           | 17-chapter tech stack guide, Starlight site, research notes                  |
+| `local/misc`                         | 1       | ✅           | gitignore, TodoReadTool, OPENCODE_SESSION_ID env var                         |
+
+### PR-only branches (not in local-dev)
+
+| Branch                      | Purpose                                     | Status       |
+| --------------------------- | ------------------------------------------- | ------------ |
+| `pr/session-watchdog`       | Simple watchdog (superseded by intelligent) | PR candidate |
+| `pr/cancel-propagation`     | Upstreamable cancel fixes                   | PR candidate |
+| `pr/provider-fallback`      | Upstreamable provider fallback              | PR candidate |
+| `pr/tool-timeout`           | Upstreamable tool timeout                   | PR candidate |
+| `pr/tui-cancel-ux`          | TUI cancel UX improvements                  | PR candidate |
+| `pr/tool-hardening`         | Tool execution hardening                    | PR candidate |
+| `pr/abort-safe-stream`      | Abort-safe stream processing                | PR candidate |
+| `pr/agent-compaction`       | Agent compaction improvements               | PR candidate |
+| `pr/cancel-correctness`     | Cancel correctness fixes                    | PR candidate |
+| `pr/permission-specificity` | Permission specificity improvements         | PR candidate |
+| `pr/retry-backoff`          | Retry backoff logic                         | PR candidate |
+| `pr/symlink-sandboxing`     | Symlink sandboxing                          | PR candidate |
 
 ## Recipes
 
@@ -110,12 +170,13 @@ _As of 2026-04-05._
 ```
 git switch -C local/<name> dev
 # make changes, commit
-# then rebuild local-dev (see sync cycle step 4)
+# add to .local-branches manifest on meta
+# rebuild local-dev
 ```
 
 ### Dropping a topic
 
-Delete the `local/*` branch, then rebuild `local-dev` without it.
+Remove from `.local-branches`, delete the branch, rebuild `local-dev`.
 
 ### Porting features from dev-safe
 
@@ -127,12 +188,6 @@ git show origin/dev-safe:<path>
 
 Inspect the file, then manually port the semantic changes to the current
 code.
-
-### Upstream PRs
-
-Branches on origin that serve as PR heads (e.g.
-`origin/pr/session-watchdog` → PR #20104). Keep these until upstream
-merges or closes the PRs.
 
 ## Commit Message Format
 

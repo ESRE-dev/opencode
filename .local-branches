@@ -1,0 +1,21 @@
+# Ordered manifest of local/* branches for the sync cycle.
+# rebuild-local-dev.sh merges these in listed order.
+# Lines starting with # are ignored. Blank lines are ignored.
+#
+# Ordering rationale:
+#   - foundational/infra patches first (subagent, compaction, cancel)
+#   - features in the middle
+#   - docs/misc last (least likely to conflict)
+
+local/compaction-agent-identity
+local/subagent-hardening
+local/compaction-todo
+local/cancel-propagation
+local/build-command
+local/tool-timeout
+local/provider-fallback
+local/tui-navigation
+local/intelligent-session-watchdog
+local/skill-preamble
+local/docs
+local/misc
