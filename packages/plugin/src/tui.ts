@@ -157,6 +157,7 @@ export type TuiPromptInfo = {
 
 export type TuiPromptRef = {
   focused: boolean
+  interrupt: number
   current: TuiPromptInfo
   set(prompt: TuiPromptInfo): void
   reset(): void

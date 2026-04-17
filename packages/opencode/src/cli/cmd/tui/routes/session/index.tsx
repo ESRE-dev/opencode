@@ -63,6 +63,7 @@ import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
+import { Header } from "./header"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { Flag } from "@/flag/flag"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
@@ -132,14 +133,38 @@ export function Session() {
       .filter((x) => x.parentID === parentID || x.id === parentID)
       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
+  const descendants = createMemo(() => {
+    const root = session()?.parentID ?? session()?.id
+    if (!root) return []
+    const all = sync.data.session
+    const result: typeof all = []
+    const visited = new Set<string>()
+    const queue = [root]
+    while (queue.length) {
+      const id = queue.shift()!
+      if (visited.has(id)) continue
+      visited.add(id)
+      const match = all.find((x) => x.id === id)
+      if (match) result.push(match)
+      for (const child of all) {
+        if (child.parentID === id && !visited.has(child.id)) queue.push(child.id)
+      }
+    }
+    return result
+  })
+  const subagents = createMemo(() => {
+    return sync.data.session
+      .filter((x) => x.parentID === route.sessionID)
+      .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
   const permissions = createMemo(() => {
     if (session()?.parentID) return []
-    return children().flatMap((x) => sync.data.permission[x.id] ?? [])
+    return descendants().flatMap((x) => sync.data.permission[x.id] ?? [])
   })
   const questions = createMemo(() => {
     if (session()?.parentID) return []
-    return children().flatMap((x) => sync.data.question[x.id] ?? [])
+    return descendants().flatMap((x) => sync.data.question[x.id] ?? [])
   })
   const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
   const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
@@ -164,6 +189,7 @@ export function Session() {
   const [diffWrapMode] = kv.signal<"word" | "none">("diff_wrap_mode", "word")
   const [_animationsEnabled, _setAnimationsEnabled] = kv.signal("animations_enabled", true)
   const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", false)
+  const [showHeader, setShowHeader] = kv.signal("header_visible", true)
 
   const wide = createMemo(() => dimensions().width > 120)
   const sidebarVisible = createMemo(() => {
@@ -340,21 +366,29 @@ export function Session() {
   const local = useLocal()
 
   function moveFirstChild() {
-    if (children().length === 1) return
-    const next = children().find((x) => !!x.parentID)
-    if (next) {
-      navigate({
-        type: "session",
-        sessionID: next.id,
-      })
+    const all = subagents()
+    if (all[0]) {
+      navigate({ type: "session", sessionID: all[0].id })
+      return
+    }
+    // Fallback: find child session from task tool parts in messages
+    for (const msg of messages()) {
+      for (const part of sync.data.part[msg.id] ?? []) {
+        if (part.type !== "tool" || part.tool !== "task") continue
+        if (part.state.status === "pending") continue
+        const id = (part.state.metadata as Record<string, any>)?.sessionId
+        if (id) {
+          navigate({ type: "session", sessionID: id })
+          return
+        }
+      }
     }
   }
 
   function moveChild(direction: number) {
-    if (children().length === 1) return
-
     const sessions = children().filter((x) => !!x.parentID)
-    let next = sessions.findIndex((x) => x.id === session()?.id) - direction
+    if (sessions.length === 0) return
+    let next = sessions.findIndex((x) => x.id === session()?.id) + direction
 
     if (next >= sessions.length) next = 0
     if (next < 0) next = sessions.length - 1
@@ -656,6 +690,15 @@ export function Session() {
       category: "Session",
       onSelect: (dialog) => {
         setShowScrollbar((prev) => !prev)
+        dialog.clear()
+      },
+    },
+    {
+      title: showHeader() ? "Hide header" : "Show header",
+      value: "session.toggle.header",
+      category: "Session",
+      onSelect: (dialog) => {
+        setShowHeader((prev) => !prev)
         dialog.clear()
       },
     },
@@ -1039,8 +1082,11 @@ export function Session() {
       }}
     >
       <box flexDirection="row">
-        <box flexGrow={1} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
+        <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
           <Show when={session()}>
+            <Show when={showHeader() && (!sidebarVisible() || !wide())}>
+              <Header />
+            </Show>
             <scrollbox
               ref={(r) => (scroll = r)}
               viewportOptions={{
@@ -1184,6 +1230,7 @@ export function Session() {
                       toBottom()
                     }}
                     sessionID={route.sessionID}
+                    parentSessionID={session()?.parentID}
                     right={<TuiPluginRuntime.Slot name="session_prompt_right" session_id={route.sessionID} />}
                   />
                 </TuiPluginRuntime.Slot>
