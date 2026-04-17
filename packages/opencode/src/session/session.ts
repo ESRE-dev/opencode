@@ -413,6 +413,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service> =
           updated: Date.now(),
         },
       }
+      if (!result.parentID) process.env.OPENCODE_SESSION_ID = result.id
       log.info("created", result)
 
       yield* Effect.sync(() => SyncEvent.run(Event.Created, { sessionID: result.id, info: result }))

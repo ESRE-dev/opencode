@@ -29,3 +29,15 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+# Scratch investigation notes
+scratch/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Machine-local AI agent config
+.claude/
+CLAUDE.md
