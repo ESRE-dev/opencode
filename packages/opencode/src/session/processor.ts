@@ -20,6 +20,37 @@ import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
 import { Log } from "@/util"
 import { isRecord } from "@/util/record"
+import { StreamIdleError, WATCHDOG_TIMEOUT_DEFAULTS } from "@/watchdog/error"
+import { spawnWatchdog } from "@/watchdog/spawn"
+
+export function startStreamIdleTripwire(ms: number, sessionID: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let fired = false
+  const controller = new AbortController()
+
+  function fire() {
+    if (fired) return
+    fired = true
+    controller.abort(new (StreamIdleError as any)({ sessionID, timeout: ms }))
+  }
+
+  timer = setTimeout(fire, ms)
+  return {
+    signal: controller.signal,
+    reset() {
+      if (fired) return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(fire, ms)
+    },
+    clear() {
+      if (timer) clearTimeout(timer)
+      fired = true
+    },
+    get fired() {
+      return fired
+    },
+  }
+}
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
@@ -549,11 +580,26 @@ export const layer: Layer.Layer<
             ctx.reasoningMap = {}
             const stream = llm.stream(streamInput)
 
-            yield* stream.pipe(
-              Stream.tap((event) => handleEvent(event)),
-              Stream.takeUntil(() => ctx.needsCompaction),
-              Stream.runDrain,
-            )
+            const cfg = yield* config.get()
+            const idleMs =
+              (cfg.experimental?.watchdog?.timeouts?.stream_idle ?? WATCHDOG_TIMEOUT_DEFAULTS.stream_idle) * 1000
+            const idle = startStreamIdleTripwire(idleMs, ctx.sessionID)
+
+            yield* stream
+              .pipe(
+                Stream.tap((event) => {
+                  idle.reset()
+                  return handleEvent(event)
+                }),
+                Stream.takeUntil(() => ctx.needsCompaction || idle.fired),
+                Stream.runDrain,
+              )
+              .pipe(Effect.ensuring(Effect.sync(() => idle.clear())))
+            if (idle.fired) {
+              const err = idle.signal.reason
+              throw err instanceof Error ? err : new Error("Stream idle timeout")
+            }
+            idle.clear()
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
@@ -565,7 +611,22 @@ export const layer: Layer.Layer<
             ),
             Effect.catchCauseIf(
               (cause) => !Cause.hasInterruptsOnly(cause),
-              (cause) => Effect.fail(Cause.squash(cause)),
+              (cause) => {
+                const err = Cause.squash(cause) as Error
+                if (StreamIdleError.isInstance(err) && streamInput.parentSessionID) {
+                  try {
+                    const secs = err.data.timeout / 1000
+                    spawnWatchdog({
+                      stuckSessionID: ctx.sessionID as any,
+                      parentSessionID: streamInput.parentSessionID as any,
+                      trigger: { tool: "stream", timeout: secs, elapsed: secs },
+                    }).catch(() => {})
+                  } catch {
+                    // never crash main session
+                  }
+                }
+                return Effect.fail(err)
+              },
             ),
             Effect.retry(
               SessionRetry.policy({
