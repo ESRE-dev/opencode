@@ -23,13 +23,23 @@ const EXTERNAL_SKILL_PATTERN = "skills/**/SKILL.md"
 const OPENCODE_SKILL_PATTERN = "{skill,skills}/**/SKILL.md"
 const SKILL_PATTERN = "**/SKILL.md"
 
+export const Metadata = z.object({
+  version: z.string().optional(),
+  sources: z.array(z.string()).default([]),
+})
+
 export const Info = z.object({
   name: z.string(),
   description: z.string(),
   location: z.string(),
   content: z.string(),
+  alwaysApply: z.boolean().default(false),
+  globs: z.array(z.string()).default([]),
+  metadata: Metadata.default({ sources: [] }),
 })
 export type Info = z.infer<typeof Info>
+
+export const Frontmatter = Info.omit({ location: true, content: true })
 
 export const InvalidError = NamedError.create(
   "SkillInvalidError",
@@ -91,7 +101,7 @@ const add = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.I
 
   if (!md) return
 
-  const parsed = Info.pick({ name: true, description: true }).safeParse(md.data)
+  const parsed = Frontmatter.safeParse(md.data)
   if (!parsed.success) return
 
   if (state.skills[parsed.data.name]) {
@@ -103,12 +113,7 @@ const add = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.I
   }
 
   state.dirs.add(path.dirname(match))
-  state.skills[parsed.data.name] = {
-    name: parsed.data.name,
-    description: parsed.data.description,
-    location: match,
-    content: md.content,
-  }
+  state.skills[parsed.data.name] = { ...parsed.data, location: match, content: md.content }
 })
 
 const scan = Effect.fnUntraced(function* (
@@ -283,6 +288,16 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
       .toSorted((a, b) => a.name.localeCompare(b.name))
       .map((skill) => `- **${skill.name}**: ${skill.description}`),
   ].join("\n")
+}
+
+export function classify(skill: Info, files: string[]): "auto" | "on-demand" {
+  if (skill.alwaysApply) return "auto"
+  for (const pattern of skill.globs) {
+    for (const file of files) {
+      if (Glob.match(pattern, file)) return "auto"
+    }
+  }
+  return "on-demand"
 }
 
 export * as Skill from "."

@@ -48,6 +48,11 @@ import { Cause, Effect, Exit, Layer, Option, Scope, Context } from "effect"
 import { EffectLogger } from "@/effect"
 import { InstanceState } from "@/effect"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
+import { SkillTool, description as skillDescription } from "@/tool/skill"
+import { Git } from "@/git"
+import { Ripgrep } from "@/file/ripgrep"
+import { Skill } from "@/skill"
+import { Glob } from "@opencode-ai/shared/util/glob"
 import { SessionRunState } from "./run-state"
 import { EffectBridge } from "@/effect"
 import { WATCHDOG_TIMEOUT_DEFAULTS } from "@/watchdog/error"
@@ -134,6 +139,137 @@ export const layer = Layer.effect(
     const summary = yield* SessionSummary.Service
     const sys = yield* SystemPrompt.Service
     const llm = yield* LLM.Service
+    const git = yield* Git.Service
+    const rg = yield* Ripgrep.Service
+    const skill = yield* Skill.Service
+
+    async function scan(dir: string): Promise<string[]> {
+      try {
+        const result = await git.run(["ls-files", "-z"], { cwd: dir }).pipe(Effect.runPromise)
+        if (result.exitCode === 0) {
+          const text = result.text()
+          if (text.length === 0) return []
+          return text.split("\0").filter((f: string) => f.length > 0)
+        }
+      } catch {}
+      const files: string[] = []
+      const collected = await rg
+        .files({ cwd: dir, maxDepth: 3 })
+        .pipe(Stream.runCollect, Effect.runPromise)
+        .catch(() => [] as string[])
+      files.push(...collected)
+      return files
+    }
+
+    type SkillState = {
+      loaded: Set<string>
+      touched: Set<string>
+      files: string[]
+    }
+
+    type SkillStateMap = {
+      sessions: Map<string, SkillState>
+      files: string[]
+    }
+
+    const skillState = yield* InstanceState.make(
+      Effect.fn("SessionPrompt.skillState")(function* (ctx) {
+        const files = yield* Effect.promise(() => scan(ctx.directory))
+        return {
+          sessions: new Map<string, SkillState>(),
+          files,
+        } satisfies SkillStateMap
+      }),
+    )
+
+    function getSkillState(map: SkillStateMap, sid: string): SkillState {
+      let ss = map.sessions.get(sid)
+      if (!ss) {
+        ss = { loaded: new Set(), touched: new Set(), files: map.files }
+        map.sessions.set(sid, ss)
+      }
+      return ss
+    }
+
+    async function buildContent(s: Skill.Info): Promise<string> {
+      const dir = path.dirname(s.location)
+      const base = pathToFileURL(dir).href
+      const limit = 10
+      let arr: string[] = []
+      try {
+        const collected = await rg
+          .files({ cwd: dir, follow: false, hidden: true })
+          .pipe(Stream.take(limit + 10), Stream.runCollect, Effect.runPromise)
+        arr = [...collected]
+          .filter((file) => !file.includes("SKILL.md"))
+          .slice(0, limit)
+          .map((file) => path.resolve(dir, file))
+      } catch {}
+      const files = arr.map((f) => `<file>${f}</file>`).join("\n")
+      return [
+        `<skill_content name="${s.name}">`,
+        `# Skill: ${s.name}`,
+        "",
+        s.content.trim(),
+        "",
+        `Base directory for this skill: ${base}`,
+        "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
+        "Note: file list is sampled.",
+        "",
+        "<skill_files>",
+        files,
+        "</skill_files>",
+        "</skill_content>",
+      ].join("\n")
+    }
+
+    const inject = Effect.fn("SessionPrompt.injectSkills")(function* (
+      sessionID: SessionID,
+      skills: Skill.Info[],
+      loaded: Set<string>,
+      parentID: MessageID,
+    ) {
+      for (const s of skills) {
+        if (loaded.has(s.name)) continue
+        const id = ulid()
+        const content = yield* Effect.promise(() => buildContent(s))
+        const now = Date.now()
+        const msg: MessageV2.Assistant = {
+          id: MessageID.ascending(),
+          parentID,
+          role: "assistant",
+          mode: "system",
+          agent: "system",
+          variant: undefined,
+          path: { cwd: "", root: "" },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: "" as any,
+          providerID: "" as any,
+          time: { created: now },
+          sessionID,
+        }
+        yield* sessions.updateMessage(msg)
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: msg.id,
+          sessionID,
+          type: "tool",
+          callID: id,
+          tool: "skill",
+          state: {
+            status: "completed",
+            input: { name: s.name },
+            output: content,
+            title: `Loaded skill: ${s.name}`,
+            metadata: { name: s.name, dir: path.dirname(s.location) },
+            time: { start: now, end: now },
+          },
+        } satisfies MessageV2.ToolPart)
+        loaded.add(s.name)
+      }
+    })
+
     const runner = Effect.fn("SessionPrompt.runner")(function* () {
       return yield* EffectBridge.make()
     })
@@ -397,13 +533,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const tools: Record<string, AITool> = {}
       const run = yield* runner()
       const promptOps = yield* ops()
+      const ssMap = yield* InstanceState.get(skillState)
+      const ss = getSkillState(ssMap, input.session.id)
 
       const context = (args: any, options: ToolExecutionOptions): Tool.Context => ({
         sessionID: input.session.id,
         abort: options.abortSignal!,
         messageID: input.processor.message.id,
         callID: options.toolCallId,
-        extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps },
+        extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps, loadedSkills: ss.loaded },
         agent: input.agent.name,
         messages: input.messages,
         metadata: (val) =>
@@ -436,9 +574,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         providerID: input.model.providerID,
         agent: input.agent,
       })) {
+        let desc = item.description
+        if (item.id === SkillTool.id && ss.loaded.size > 0) {
+          desc = yield* skillDescription(ss.loaded)(input.agent)
+        }
         const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
         tools[item.id] = tool({
-          description: item.description,
+          description: desc,
           inputSchema: jsonSchema(schema),
           execute(args, options) {
             return run.promise(
@@ -1445,6 +1587,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               overflow: task.overflow,
             })
             if (result === "stop") break
+            // Re-inject auto-loaded skills after compaction
+            const ssMap2 = yield* InstanceState.get(skillState)
+            const ss2 = getSkillState(ssMap2, sessionID)
+            ss2.loaded.clear()
+            const compAgent = yield* agents.get(lastUser.agent)
+            if (compAgent) {
+              const union = [...new Set([...ssMap2.files, ...ss2.touched])]
+              const permitted = yield* skill.available(compAgent)
+              const auto = permitted.filter((s: Skill.Info) => Skill.classify(s, union) === "auto")
+              if (auto.length > 0) {
+                yield* inject(sessionID, auto, ss2.loaded, lastUser.id)
+              }
+            }
             continue
           }
 
@@ -1467,6 +1622,21 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
           const maxSteps = agent.steps ?? Infinity
           const isLastStep = step >= maxSteps
+
+          // Auto-load skills on first step
+          if (step === 1) {
+            const ssMap3 = yield* InstanceState.get(skillState)
+            const ss3 = getSkillState(ssMap3, sessionID)
+            if (ss3.loaded.size === 0) {
+              const permitted = yield* skill.available(agent)
+              const auto = permitted.filter((s: Skill.Info) => Skill.classify(s, ss3.files) === "auto")
+              if (auto.length > 0) {
+                yield* inject(sessionID, auto, ss3.loaded, lastUser.id)
+                msgs = yield* MessageV2.filterCompactedEffect(sessionID)
+              }
+            }
+          }
+
           msgs = yield* insertReminders({ messages: msgs, agent, session })
 
           const msg: MessageV2.Assistant = {
@@ -1537,8 +1707,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
+            const sksMap = yield* InstanceState.get(skillState)
+            const sks = getSkillState(sksMap, sessionID)
             const [skills, env, instructions, modelMsgs] = yield* Effect.all([
-              sys.skills(agent),
+              sys.skills(agent, sks.loaded),
               Effect.sync(() => sys.environment(model)),
               instruction.system().pipe(Effect.orDie),
               MessageV2.toModelMessagesEffect(msgs, model),
@@ -1777,6 +1949,8 @@ export const defaultLayer = Layer.suspend(() =>
         Agent.defaultLayer,
         SystemPrompt.defaultLayer,
         LLM.defaultLayer,
+        Git.defaultLayer,
+        Skill.defaultLayer,
         Bus.layer,
         CrossSpawnSpawner.defaultLayer,
       ),

@@ -6,6 +6,7 @@ import * as Stream from "effect/Stream"
 import { EffectLogger } from "@/effect"
 import { Ripgrep } from "../file/ripgrep"
 import { Skill } from "../skill"
+import { Agent } from "@/agent/agent"
 import * as Tool from "./tool"
 
 const Parameters = z.object({
@@ -45,6 +46,18 @@ export const SkillTool = Tool.define(
           parameters: Parameters,
           execute: (params: z.infer<typeof Parameters>, ctx: Tool.Context) =>
             Effect.gen(function* () {
+              const loaded = ctx.extra?.loadedSkills as Set<string> | undefined
+              if (loaded?.has(params.name)) {
+                return {
+                  title: `Skill: ${params.name}`,
+                  output: `Skill "${params.name}" is already loaded in this session.`,
+                  metadata: {
+                    name: params.name,
+                    dir: "",
+                  },
+                }
+              }
+
               const info = yield* skill.get(params.name)
               if (!info) {
                 const all = yield* skill.all()
@@ -69,6 +82,8 @@ export const SkillTool = Tool.define(
                 Stream.runCollect,
                 Effect.map((chunk) => [...chunk].map((file) => `<file>${file}</file>`).join("\n")),
               )
+
+              loaded?.add(params.name)
 
               return {
                 title: `Loaded skill: ${info.name}`,
@@ -97,3 +112,29 @@ export const SkillTool = Tool.define(
       })
   }),
 )
+
+export function description(exclude?: Set<string>): Tool.DynamicDescription {
+  return (agent: Agent.Info) =>
+    Effect.gen(function* () {
+      const skill = yield* Skill.Service
+      const all = yield* skill.available(agent)
+      const list = exclude ? all.filter((s) => !exclude.has(s.name)) : all
+      if (list.length === 0) return "No skills are currently available."
+      return [
+        "Load a specialized skill that provides domain-specific instructions and workflows.",
+        "",
+        "When you recognize that a task matches one of the available skills listed below, use this tool to load the full skill instructions.",
+        "",
+        "The skill will inject detailed instructions, workflows, and access to bundled resources (scripts, references, templates) into the conversation context.",
+        "",
+        'Tool output includes a `<skill_content name="...">` block with the loaded content.',
+        "",
+        "The following skills provide specialized sets of instructions for particular tasks",
+        "Invoke this tool to load a skill when a task matches one of the available skills listed below:",
+        "",
+        Skill.fmt(list, { verbose: false }),
+      ].join("\n")
+    }).pipe(Effect.provide(Skill.defaultLayer))
+}
+
+export const SkillDescription: Tool.DynamicDescription = description()
