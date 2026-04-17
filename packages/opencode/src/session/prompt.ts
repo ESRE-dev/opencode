@@ -1951,6 +1951,7 @@ export const defaultLayer = Layer.suspend(() =>
         LLM.defaultLayer,
         Git.defaultLayer,
         Skill.defaultLayer,
+        Ripgrep.defaultLayer,
         Bus.layer,
         CrossSpawnSpawner.defaultLayer,
       ),
