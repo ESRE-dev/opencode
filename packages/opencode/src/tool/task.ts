@@ -21,6 +21,25 @@ const MIN_TIMEOUT = 1_800_000 // 30 minutes — floor for LLM-specified values
 
 const id = "task"
 
+export function childText(
+  sessionID: string,
+  result: { ok: true; value: MessageV2.WithParts } | { ok: false; error: unknown },
+): string {
+  if (!result.ok) return `Child session error: ${errorMessage(result.error)}`
+
+  const msg = result.value
+  if (msg.info.role === "assistant" && msg.info.error && MessageV2.AbortedError.isInstance(msg.info.error)) {
+    const report = diagnostics.get(sessionID)
+    diagnostics.delete(sessionID)
+    if (report) return ["Child session was cancelled by watchdog. Diagnostic report:", "", report].join("\n")
+    return `Child session ${sessionID} was aborted.`
+  }
+
+  const text = msg.parts.findLast((x) => x.type === "text")?.text
+  if (!text) return "Child session returned no content."
+  return text
+}
+
 const parameters = z.object({
   description: z.string().describe("A short (3-5 words) description of the task"),
   prompt: z.string().describe("The task for the agent to perform"),
@@ -206,6 +225,29 @@ export const TaskTool = Tool.define(
 
       const messageID = MessageID.ascending()
 
+      const timeouts = cfg.experimental?.watchdog?.timeouts
+      const cfgMs = (timeouts?.task ?? WATCHDOG_TIMEOUT_DEFAULTS.task) * 1000
+      const paramMs = params.timeout ? Math.max(params.timeout * 1000, MIN_TIMEOUT) : undefined
+      const ms = paramMs ?? cfgMs
+      const deadline = abortAfterAny(ms, ctx.abort)
+
+      let watchdogSpawned = false
+      const onDeadline = () => {
+        if (watchdogSpawned) return
+        if (ctx.abort.aborted) return // user cancelled, not a timeout
+        watchdogSpawned = true
+        try {
+          spawnWatchdog({
+            stuckSessionID: nextSession.id as any,
+            parentSessionID: ctx.sessionID as any,
+            trigger: { tool: "task", timeout: ms / 1000, elapsed: ms / 1000 },
+          }).catch(() => {})
+        } catch {
+          // never crash main session
+        }
+      }
+      deadline.signal.addEventListener("abort", onDeadline)
+
       function cancel() {
         ops.cancel(nextSession.id)
       }
@@ -314,6 +356,86 @@ export const TaskTool = Tool.define(
               deadlineAborted: deadline.signal.aborted,
             })
 
+            const result = yield* promptEffect.pipe(
+              Effect.catchDefect((e) => {
+                // If parent was aborted (user Ctrl+C), re-throw
+                if (ctx.abort.aborted) return Effect.die(e)
+                // If the deadline fired, it's a real timeout
+                if (deadline.signal.aborted) {
+                  cancel()
+                  return Effect.succeed(undefined)
+                }
+                // Non-timeout, non-abort error — surface the actual failure
+                cancel()
+                const reason = e instanceof Error ? e.message : String(e)
+                return Effect.succeed({ _error: reason } as const)
+              }),
+            )
+
+            deadline.clearTimeout()
+
+            // Timeout: deadline fired but parent wasn't cancelled
+            if (result === undefined) {
+              const limit = Math.round(ms / 1000)
+              return {
+                title: params.description,
+                metadata: {
+                  sessionId: nextSession.id,
+                  model,
+                },
+                output: [
+                  `TIMEOUT: Task exceeded ${limit}s deadline and was cancelled.`,
+                  `task_id: ${nextSession.id}`,
+                  "",
+                  "You can resume this task by passing the task_id above.",
+                  "Recommended: retry with a simpler or more focused prompt. Break large tasks into smaller sub-tasks.",
+                ].join("\n"),
+              }
+            }
+
+            // Non-timeout error
+            if ("_error" in result) {
+              return {
+                title: params.description,
+                metadata: {
+                  sessionId: nextSession.id,
+                  model,
+                },
+                output: [
+                  `ERROR: Task failed: ${result._error}`,
+                  `task_id: ${nextSession.id}`,
+                  "",
+                  "You can retry this task by passing the task_id above, or try a different approach.",
+                ].join("\n"),
+              }
+            }
+
+            // Detect timeout: deadline fired after prompt returned but before we got here
+            if (deadline.signal.aborted && !ctx.abort.aborted) {
+              const limit = Math.round(ms / 1000)
+              const partial = yield* childText(sessions, result, nextSession.id, { skipAbort: true })
+              return {
+                title: params.description,
+                metadata: {
+                  sessionId: nextSession.id,
+                  model,
+                },
+                output: [
+                  `TIMEOUT: Task exceeded ${limit}s deadline and was cancelled.`,
+                  `task_id: ${nextSession.id}`,
+                  "",
+                  ...(partial ? ["Partial output recovered from the timed-out session:", "", partial, ""] : []),
+                  "You can resume this task by passing the task_id above.",
+                  "Recommended: retry with a simpler or more focused prompt. Break large tasks into smaller sub-tasks.",
+                ].join("\n"),
+              }
+            }
+
+            const text = yield* childText(sessions, result, nextSession.id, {
+              parentAborted: ctx.abort.aborted,
+              deadlineAborted: deadline.signal.aborted,
+            })
+
             return {
               title: params.description,
               metadata: {
@@ -334,6 +456,8 @@ export const TaskTool = Tool.define(
             deadline.clearTimeout()
             deadline.signal.removeEventListener("abort", cancel)
             ctx.abort.removeEventListener("abort", cancel)
+            deadline.signal.removeEventListener("abort", onDeadline)
+            deadline.clearTimeout()
           }),
       )
     })

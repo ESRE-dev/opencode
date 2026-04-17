@@ -230,6 +230,20 @@ export const Info = z
           .positive()
           .optional()
           .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
+        task_timeout: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            "Default timeout in milliseconds for Task tool sub-agent execution (default: 1800000 = 30 minutes)",
+          ),
+        tool_timeout: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Global timeout in milliseconds for individual tool executions (default: 900000 = 15 minutes)"),
       })
       .optional(),
   })
