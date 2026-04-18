@@ -26,10 +26,11 @@ import { spawnWatchdog } from "@/watchdog/spawn"
 export function startStreamIdleTripwire(ms: number, sessionID: string) {
   let timer: ReturnType<typeof setTimeout> | undefined
   let fired = false
+  let cleared = false
   const controller = new AbortController()
 
   function fire() {
-    if (fired) return
+    if (fired || cleared) return
     fired = true
     controller.abort(new (StreamIdleError as any)({ sessionID, timeout: ms }))
   }
@@ -38,13 +39,13 @@ export function startStreamIdleTripwire(ms: number, sessionID: string) {
   return {
     signal: controller.signal,
     reset() {
-      if (fired) return
+      if (fired || cleared) return
       if (timer) clearTimeout(timer)
       timer = setTimeout(fire, ms)
     },
     clear() {
       if (timer) clearTimeout(timer)
-      fired = true
+      cleared = true
     },
     get fired() {
       return fired
