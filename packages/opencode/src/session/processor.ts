@@ -23,13 +23,17 @@ import { isRecord } from "@/util/record"
 import { StreamIdleError, WATCHDOG_TIMEOUT_DEFAULTS } from "@/watchdog/error"
 import { spawnWatchdog } from "@/watchdog/spawn"
 
-export function startStreamIdleTripwire(ms: number, sessionID: string) {
+export function startStreamIdleTripwire(ms: number, sessionID: string, opts?: { getActiveToolCount?: () => number }) {
   let timer: ReturnType<typeof setTimeout> | undefined
   let fired = false
   const controller = new AbortController()
 
   function fire() {
     if (fired) return
+    if (opts?.getActiveToolCount && opts.getActiveToolCount() > 0) {
+      timer = setTimeout(fire, ms)
+      return
+    }
     fired = true
     controller.abort(new (StreamIdleError as any)({ sessionID, timeout: ms }))
   }
@@ -581,7 +585,11 @@ export const layer: Layer.Layer<
             const cfg = yield* config.get()
             const idleMs =
               (cfg.experimental?.watchdog?.timeouts?.stream_idle ?? WATCHDOG_TIMEOUT_DEFAULTS.stream_idle) * 1000
-            const idle = streamInput.parentSessionID ? startStreamIdleTripwire(idleMs, ctx.sessionID) : undefined
+            const idle = streamInput.parentSessionID
+              ? startStreamIdleTripwire(idleMs, ctx.sessionID, {
+                  getActiveToolCount: () => Object.keys(ctx.toolcalls).length,
+                })
+              : undefined
 
             yield* stream
               .pipe(
