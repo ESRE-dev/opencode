@@ -11,7 +11,7 @@ export const StreamIdleError = NamedError.create(
 )
 
 export const WATCHDOG_TIMEOUT_DEFAULTS = {
-  stream_idle: 120,
+  stream_idle: 300,
   task: 14400,
   bash: 120,
   tool_default: 300,
