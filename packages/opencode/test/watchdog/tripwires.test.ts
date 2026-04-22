@@ -176,6 +176,25 @@ describe("stream idle tripwire", () => {
     idle.clear()
   })
 
+  test("suppresses firing during inter-step gap (awaitingToolStep)", async () => {
+    let awaitingToolStep = false
+    const tripwire = startStreamIdleTripwire(50, "test-session", {
+      getActiveToolCount: () => (awaitingToolStep ? 1 : 0),
+    })
+    // Simulate: tools completed, now in inter-step gap
+    awaitingToolStep = true
+    await new Promise((r) => setTimeout(r, 80))
+    expect(tripwire.fired).toBe(false)
+    expect(tripwire.signal.aborted).toBe(false)
+    // Simulate: next step starts
+    awaitingToolStep = false
+    tripwire.reset()
+    await new Promise((r) => setTimeout(r, 80))
+    // Now it should fire (no tools, not awaiting step)
+    expect(tripwire.fired).toBe(true)
+    tripwire.clear()
+  })
+
   test("backward compatibility: no opts behaves identically", async () => {
     const ms = 50
     const idle = startStreamIdleTripwire(ms, "ses_compat")

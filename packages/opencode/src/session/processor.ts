@@ -106,6 +106,7 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: MessageV2.TextPart | undefined
   reasoningMap: Record<string, MessageV2.ReasoningPart>
+  awaitingToolStep: boolean
 }
 
 type StreamEvent = Event
@@ -156,6 +157,7 @@ export const layer: Layer.Layer<
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        awaitingToolStep: false,
       }
       let aborted = false
       const slog = log.clone().tag("sessionID", input.sessionID).tag("messageID", input.assistantMessage.id)
@@ -379,6 +381,7 @@ export const layer: Layer.Layer<
             throw value.error
 
           case "start-step":
+            ctx.awaitingToolStep = false
             if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
             yield* session.updatePart({
               id: PartID.ascending(),
@@ -396,6 +399,7 @@ export const layer: Layer.Layer<
               metadata: value.providerMetadata,
             })
             ctx.assistantMessage.finish = value.finishReason
+            ctx.awaitingToolStep = value.finishReason === "tool-calls"
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
             yield* session.updatePart({
@@ -587,7 +591,7 @@ export const layer: Layer.Layer<
               (cfg.experimental?.watchdog?.timeouts?.stream_idle ?? WATCHDOG_TIMEOUT_DEFAULTS.stream_idle) * 1000
             const idle = streamInput.parentSessionID
               ? startStreamIdleTripwire(idleMs, ctx.sessionID, {
-                  getActiveToolCount: () => Object.keys(ctx.toolcalls).length,
+                  getActiveToolCount: () => Object.keys(ctx.toolcalls).length + (ctx.awaitingToolStep ? 1 : 0),
                 })
               : undefined
 
