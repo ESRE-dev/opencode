@@ -26,23 +26,37 @@ import { spawnWatchdog } from "@/watchdog/spawn"
 export function startStreamIdleTripwire(ms: number, sessionID: string, opts?: { getActiveToolCount?: () => number }) {
   let timer: ReturnType<typeof setTimeout> | undefined
   let fired = false
+  let eventCount = 0
+  let lastEventType: string | undefined
+  let lastEventTime = Date.now()
+  const startTime = Date.now()
   const controller = new AbortController()
 
   function fire() {
     if (fired) return
-    if (opts?.getActiveToolCount && opts.getActiveToolCount() > 0) {
+    const activeTools = opts?.getActiveToolCount ? opts.getActiveToolCount() : -1
+    if (opts?.getActiveToolCount && activeTools > 0) {
+      console.warn(
+        `[idle-tripwire] SUPPRESSED for ${sessionID} — activeTools=${activeTools}, events=${eventCount}, lastEvent=${lastEventType}, silenceMs=${Date.now() - lastEventTime}`,
+      )
       timer = setTimeout(fire, ms)
       return
     }
     fired = true
+    console.warn(
+      `[idle-tripwire] FIRED for ${sessionID} — activeTools=${activeTools}, events=${eventCount}, lastEvent=${lastEventType}, silenceMs=${Date.now() - lastEventTime}, totalMs=${Date.now() - startTime}`,
+    )
     controller.abort(new (StreamIdleError as any)({ sessionID, timeout: ms }))
   }
 
   timer = setTimeout(fire, ms)
   return {
     signal: controller.signal,
-    reset() {
+    reset(eventType?: string) {
       if (fired) return
+      eventCount++
+      if (eventType) lastEventType = eventType
+      lastEventTime = Date.now()
       if (timer) clearTimeout(timer)
       timer = setTimeout(fire, ms)
     },
@@ -563,6 +577,11 @@ export const layer: Layer.Layer<
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
         slog.error("process", { error: errorMessage(e), stack: e instanceof Error ? e.stack : undefined })
+        if (StreamIdleError.isInstance(e)) {
+          console.warn(
+            `[idle-tripwire] HALT for ${ctx.sessionID} — toolcalls=${JSON.stringify(Object.keys(ctx.toolcalls))}, awaitingToolStep=${ctx.awaitingToolStep}`,
+          )
+        }
         const error = parse(e)
         if (MessageV2.ContextOverflowError.isInstance(error)) {
           ctx.needsCompaction = true
@@ -600,7 +619,7 @@ export const layer: Layer.Layer<
             yield* stream
               .pipe(
                 Stream.tap((event) => {
-                  idle?.reset()
+                  idle?.reset(event.type)
                   return handleEvent(event)
                 }),
                 Stream.takeUntil(() => ctx.needsCompaction || (idle?.fired ?? false)),
