@@ -63,8 +63,17 @@ cp packages/opencode/dist/opencode-darwin-arm64/bin/opencode ~/.opencode/bin/ope
 
 Bun's compiler produces an unsigned Mach-O binary. macOS will SIGKILL (exit 137) any unsigned arm64 executable on launch — the shell just reports `Killed: 9` with no other error. This step is NOT optional.
 
+**Bun ≥ 1.3.12** embeds a corrupt `LC_CODE_SIGNATURE` ([oven-sh/bun#29361](https://github.com/oven-sh/bun/issues/29361)). You must strip it before re-signing:
+
 ```bash
-xattr -d com.apple.provenance ~/.opencode/bin/opencode 2>/dev/null; codesign --force --sign - ~/.opencode/bin/opencode
+codesign --remove-signature ~/.opencode/bin/opencode 2>/dev/null
+codesign --force --sign - ~/.opencode/bin/opencode
+```
+
+For **Bun ≤ 1.3.11**, the simpler form also works:
+
+```bash
+codesign --force --sign - ~/.opencode/bin/opencode
 ```
 
 ### 6. Verify
@@ -82,6 +91,7 @@ Revert the root `package.json` workspaces back to the original glob if it was tr
 ## Troubleshooting
 
 - `Killed: 9` / exit 137 → Binary is unsigned. Run step 5.
+- `codesign: invalid or unsupported format for signature` → Bun ≥ 1.3.12 regression ([#29361](https://github.com/oven-sh/bun/issues/29361)). Run `codesign --remove-signature` first, then `codesign --force --sign -`. Or downgrade to Bun 1.3.11.
 - `SELF_SIGNED_CERT_IN_CHAIN` during `bun install` → Workspace not trimmed. Run step 1.
 - Empty sessions after build → Dev channel uses a separate DB (`opencode-dev.db`). Set `export OPENCODE_DISABLE_CHANNEL_DB=1` in your shell profile.
 
@@ -90,3 +100,4 @@ Revert the root `package.json` workspaces back to the original glob if it was tr
 - The build script at `packages/opencode/script/build.ts` line 54 includes a custom fix: migration entries need a `name` field or the binary crashes on first launch with an empty SQL placeholder.
 - The `--skip-install` flag saves ~1 min on rebuilds by skipping cross-platform native dep download.
 - Ad-hoc signing (`codesign --force --sign -`) is sufficient; no Apple Developer certificate needed.
+- Bun 1.3.12 has a known regression where `LC_CODE_SIGNATURE.datasize` is too small for the SuperBlob. The workaround is to strip the corrupt signature with `codesign --remove-signature` before re-signing. Track [oven-sh/bun#29361](https://github.com/oven-sh/bun/issues/29361) for the fix.
