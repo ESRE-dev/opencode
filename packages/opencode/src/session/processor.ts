@@ -622,11 +622,11 @@ export const layer: Layer.Layer<
                   idle?.reset(event.type)
                   return handleEvent(event)
                 }),
-                Stream.takeUntil(() => ctx.needsCompaction || (idle?.fired ?? false)),
+                Stream.takeUntil(() => ctx.needsCompaction || (idle?.signal.aborted ?? false)),
                 Stream.runDrain,
               )
               .pipe(Effect.ensuring(Effect.sync(() => idle?.clear())))
-            if (idle?.fired) {
+            if (idle?.signal.aborted) {
               const err = idle.signal.reason
               throw err instanceof Error ? err : new Error("Stream idle timeout")
             }
