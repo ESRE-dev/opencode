@@ -581,23 +581,23 @@ export const layer: Layer.Layer<
             const cfg = yield* config.get()
             const idleMs =
               (cfg.experimental?.watchdog?.timeouts?.stream_idle ?? WATCHDOG_TIMEOUT_DEFAULTS.stream_idle) * 1000
-            const idle = startStreamIdleTripwire(idleMs, ctx.sessionID)
+            const idle = streamInput.parentSessionID ? startStreamIdleTripwire(idleMs, ctx.sessionID) : undefined
 
             yield* stream
               .pipe(
                 Stream.tap((event) => {
-                  idle.reset()
+                  idle?.reset()
                   return handleEvent(event)
                 }),
-                Stream.takeUntil(() => ctx.needsCompaction || idle.fired),
+                Stream.takeUntil(() => ctx.needsCompaction || (idle?.fired ?? false)),
                 Stream.runDrain,
               )
-              .pipe(Effect.ensuring(Effect.sync(() => idle.clear())))
-            if (idle.fired) {
+              .pipe(Effect.ensuring(Effect.sync(() => idle?.clear())))
+            if (idle?.fired) {
               const err = idle.signal.reason
               throw err instanceof Error ? err : new Error("Stream idle timeout")
             }
-            idle.clear()
+            idle?.clear()
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
