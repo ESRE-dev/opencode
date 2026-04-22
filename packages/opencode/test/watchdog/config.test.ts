@@ -58,7 +58,7 @@ describe("watchdog config schema", () => {
 
 describe("watchdog timeout defaults", () => {
   test("defaults are defined", () => {
-    expect(WATCHDOG_TIMEOUT_DEFAULTS.stream_idle).toBe(120)
+    expect(WATCHDOG_TIMEOUT_DEFAULTS.stream_idle).toBe(300)
     expect(WATCHDOG_TIMEOUT_DEFAULTS.task).toBe(14400)
     expect(WATCHDOG_TIMEOUT_DEFAULTS.bash).toBe(120)
     expect(WATCHDOG_TIMEOUT_DEFAULTS.tool_default).toBe(300)
@@ -78,7 +78,7 @@ describe("watchdog timeout defaults", () => {
   test("absent config falls back to default", () => {
     const result = Config.Info.parse({})
     const resolved = result.experimental?.watchdog?.timeouts?.stream_idle ?? WATCHDOG_TIMEOUT_DEFAULTS.stream_idle
-    expect(resolved).toBe(120)
+    expect(resolved).toBe(300)
   })
 
   test("partial config overrides only specified keys", () => {
@@ -88,7 +88,7 @@ describe("watchdog timeout defaults", () => {
     const t = result.experimental?.watchdog?.timeouts
     expect(t?.bash ?? WATCHDOG_TIMEOUT_DEFAULTS.bash).toBe(60)
     expect(t?.task ?? WATCHDOG_TIMEOUT_DEFAULTS.task).toBe(14400)
-    expect(t?.stream_idle ?? WATCHDOG_TIMEOUT_DEFAULTS.stream_idle).toBe(120)
+    expect(t?.stream_idle ?? WATCHDOG_TIMEOUT_DEFAULTS.stream_idle).toBe(300)
     expect(t?.tool_default ?? WATCHDOG_TIMEOUT_DEFAULTS.tool_default).toBe(300)
   })
 })
