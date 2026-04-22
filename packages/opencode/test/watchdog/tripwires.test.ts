@@ -65,6 +65,126 @@ describe("stream idle tripwire", () => {
     expect(err.data.timeout).toBe(ms)
     idle.clear()
   })
+
+  test("tool suppression: does not fire while tools are in-flight", async () => {
+    const ms = 50
+    let toolCount = 2
+    const idle = startStreamIdleTripwire(ms, "ses_suppress", {
+      getActiveToolCount: () => toolCount,
+    })
+    // Wait past the timeout — should NOT fire because tools are active
+    await new Promise((r) => setTimeout(r, ms + 30))
+    expect(idle.fired).toBe(false)
+    expect(idle.signal.aborted).toBe(false)
+    idle.clear()
+  })
+
+  test("tool suppression: fires after tools complete", async () => {
+    const ms = 50
+    let toolCount = 1
+    const idle = startStreamIdleTripwire(ms, "ses_fire_after", {
+      getActiveToolCount: () => toolCount,
+    })
+    // First expiration: suppressed (toolCount=1)
+    await new Promise((r) => setTimeout(r, ms + 30))
+    expect(idle.fired).toBe(false)
+    // Tools complete
+    toolCount = 0
+    // Wait for re-armed timer to fire
+    await new Promise((r) => setTimeout(r, ms + 30))
+    expect(idle.fired).toBe(true)
+    expect(idle.signal.aborted).toBe(true)
+    idle.clear()
+  })
+
+  test("tool suppression: multiple re-arm cycles", async () => {
+    const ms = 40
+    let toolCount = 3
+    const idle = startStreamIdleTripwire(ms, "ses_rearm", {
+      getActiveToolCount: () => toolCount,
+    })
+    // Suppress through 3 cycles
+    for (let i = 0; i < 3; i++) {
+      await new Promise((r) => setTimeout(r, ms + 20))
+      expect(idle.fired).toBe(false)
+    }
+    // Now let it fire
+    toolCount = 0
+    await new Promise((r) => setTimeout(r, ms + 20))
+    expect(idle.fired).toBe(true)
+    idle.clear()
+  })
+
+  test("tool suppression: clear during suppression prevents fire", async () => {
+    const ms = 50
+    let toolCount = 1
+    const idle = startStreamIdleTripwire(ms, "ses_clear_suppress", {
+      getActiveToolCount: () => toolCount,
+    })
+    // First expiration: suppressed
+    await new Promise((r) => setTimeout(r, ms + 30))
+    expect(idle.fired).toBe(false)
+    // Clear while suppressed
+    idle.clear()
+    toolCount = 0
+    // Wait for what would be the re-armed timer
+    await new Promise((r) => setTimeout(r, ms + 30))
+    expect(idle.signal.aborted).toBe(false)
+  })
+
+  test("tool suppression: fires when count is 0 with options present", async () => {
+    const ms = 50
+    const idle = startStreamIdleTripwire(ms, "ses_zero_opts", {
+      getActiveToolCount: () => 0,
+    })
+    await new Promise((r) => setTimeout(r, ms + 30))
+    expect(idle.fired).toBe(true)
+    expect(idle.signal.aborted).toBe(true)
+    idle.clear()
+  })
+
+  test("tool suppression: reset during re-arm cycle", async () => {
+    const ms = 50
+    let toolCount = 1
+    const idle = startStreamIdleTripwire(ms, "ses_reset_rearm", {
+      getActiveToolCount: () => toolCount,
+    })
+    // First expiration: suppressed
+    await new Promise((r) => setTimeout(r, ms + 30))
+    expect(idle.fired).toBe(false)
+    // Reset while in re-arm cycle
+    idle.reset()
+    toolCount = 0
+    // Wait for the reset timer to fire
+    await new Promise((r) => setTimeout(r, ms + 30))
+    expect(idle.fired).toBe(true)
+    idle.clear()
+  })
+
+  test("tool suppression: getter called at most once per expiration", async () => {
+    const ms = 50
+    let calls = 0
+    const getter = () => {
+      calls++
+      return 1
+    }
+    const idle = startStreamIdleTripwire(ms, "ses_once_per_exp", {
+      getActiveToolCount: getter,
+    })
+    await new Promise((r) => setTimeout(r, ms + 30))
+    expect(calls).toBe(1)
+    idle.clear()
+  })
+
+  test("backward compatibility: no opts behaves identically", async () => {
+    const ms = 50
+    const idle = startStreamIdleTripwire(ms, "ses_compat")
+    await new Promise((r) => setTimeout(r, ms + 30))
+    expect(idle.fired).toBe(true)
+    expect(idle.signal.aborted).toBe(true)
+    expect(StreamIdleError.isInstance(idle.signal.reason)).toBe(true)
+    idle.clear()
+  })
 })
 
 describe("tool tripwire", () => {
@@ -151,7 +271,7 @@ describe("task deadline", () => {
     // Validate the constants are accessible and correct
     const { WATCHDOG_TIMEOUT_DEFAULTS } = await import("../../src/watchdog/error")
     expect(WATCHDOG_TIMEOUT_DEFAULTS.task).toBe(14400) // 4 hours in seconds
-    expect(WATCHDOG_TIMEOUT_DEFAULTS.stream_idle).toBe(120)
+    expect(WATCHDOG_TIMEOUT_DEFAULTS.stream_idle).toBe(300)
     expect(WATCHDOG_TIMEOUT_DEFAULTS.tool_default).toBe(300)
   })
 })
