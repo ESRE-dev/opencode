@@ -56,6 +56,12 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionCompaction") {}
 
+export function buildIdentityReinforcement(agentName: string, source: Agent.Info | undefined): string | undefined {
+  if (!source?.prompt || source?.native) return undefined
+  const description = source?.description || "a specialized agent"
+  return `<system-reminder>\nYou are the "${agentName}" agent.\nRole: ${description}\nYour role and constraints from your system prompt still apply after this compaction.\nContinue performing your designated role. Do not switch to code implementation or deviate from your assigned responsibilities.\n</system-reminder>`
+}
+
 export const layer: Layer.Layer<
   Service,
   never,
@@ -222,8 +228,7 @@ When constructing the summary, try to stick to this template:
       const system: string[] = []
       if (source?.prompt) {
         const max = 4000
-        const truncated =
-          source.prompt.length > max ? source.prompt.slice(0, max) + "\n[...truncated]" : source.prompt
+        const truncated = source.prompt.length > max ? source.prompt.slice(0, max) + "\n[...truncated]" : source.prompt
         system.push(truncated)
       }
       const msgs = structuredClone(messages)
@@ -314,10 +319,7 @@ When constructing the summary, try to stick to this template:
 
       if (result === "continue" && input.auto) {
         // Inject post-compaction agent identity reminder for specialized agents
-        const reminder =
-          source?.prompt && !source?.native
-            ? `<system-reminder>You are the "${userMessage.agent}" agent. Your role and constraints from your system prompt still apply after this compaction. Do not deviate from your assigned role.</system-reminder>`
-            : undefined
+        const reminder = buildIdentityReinforcement(userMessage.agent, source)
         if (replay) {
           const original = replay.info
           const replayMsg = yield* session.updateMessage({

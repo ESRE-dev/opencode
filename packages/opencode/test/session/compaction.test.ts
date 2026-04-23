@@ -7,7 +7,7 @@ import { Bus } from "../../src/bus"
 import { Config } from "../../src/config"
 import { Agent } from "../../src/agent/agent"
 import { LLM } from "../../src/session/llm"
-import { SessionCompaction } from "../../src/session/compaction"
+import { SessionCompaction, buildIdentityReinforcement } from "../../src/session/compaction"
 import { Token } from "../../src/util"
 import { Instance } from "../../src/project/instance"
 import { Log } from "../../src/util"
@@ -1826,5 +1826,65 @@ describe("session.compaction.agentAware", () => {
         }
       },
     })
+  })
+})
+
+describe("buildIdentityReinforcement", () => {
+  function makeAgent(overrides: Partial<Agent.Info> = {}): Agent.Info {
+    return {
+      name: "test-agent",
+      mode: "primary",
+      permission: [],
+      options: {},
+      ...overrides,
+    }
+  }
+
+  test("custom agent with description returns reinforcement containing name and description", () => {
+    const source = makeAgent({ prompt: "You are a reviewer", description: "a code review specialist", native: false })
+    const result = buildIdentityReinforcement("reviewer", source)
+    expect(result).toBeDefined()
+    expect(result).toContain("reviewer")
+    expect(result).toContain("a code review specialist")
+    expect(result).toContain("<system-reminder>")
+    expect(result).toContain("</system-reminder>")
+  })
+
+  test("custom agent without description falls back to generic description", () => {
+    const source = makeAgent({ prompt: "You are a reviewer", native: false })
+    const result = buildIdentityReinforcement("reviewer", source)
+    expect(result).toBeDefined()
+    expect(result).toContain("reviewer")
+    expect(result).toContain("a specialized agent")
+  })
+
+  test("custom agent with empty description falls back to generic description", () => {
+    const source = makeAgent({ prompt: "You are a reviewer", description: "", native: false })
+    const result = buildIdentityReinforcement("reviewer", source)
+    expect(result).toBeDefined()
+    expect(result).toContain("a specialized agent")
+  })
+
+  test("native agent returns undefined", () => {
+    const source = makeAgent({ prompt: "Built-in prompt", native: true })
+    const result = buildIdentityReinforcement("build", source)
+    expect(result).toBeUndefined()
+  })
+
+  test("undefined source returns undefined without throwing", () => {
+    const result = buildIdentityReinforcement("ghost", undefined)
+    expect(result).toBeUndefined()
+  })
+
+  test("agent without prompt returns undefined", () => {
+    const source = makeAgent({ native: false })
+    const result = buildIdentityReinforcement("reviewer", source)
+    expect(result).toBeUndefined()
+  })
+
+  test("returns plain string, not modifying system prompt inputs", () => {
+    const source = makeAgent({ prompt: "You are a reviewer", description: "reviewer role", native: false })
+    const result = buildIdentityReinforcement("reviewer", source)
+    expect(typeof result).toBe("string")
   })
 })
