@@ -1824,6 +1824,372 @@ describe("session.compaction.agentAware", () => {
   })
 })
 
+describe("session.compaction.process combined identity+todo", () => {
+  function agentLayer(agents: Record<string, Partial<Agent.Info>>) {
+    const full: Record<string, Agent.Info> = {}
+    for (const [name, info] of Object.entries(agents)) {
+      full[name] = {
+        name,
+        mode: "primary",
+        permission: [],
+        options: {},
+        ...info,
+      }
+    }
+    return Layer.mock(Agent.Service)({
+      get: Effect.fn("TestAgent.get")((name: string) => Effect.succeed(full[name]!)),
+      list: Effect.fn("TestAgent.list")(() => Effect.succeed(Object.values(full))),
+      defaultAgent: Effect.fn("TestAgent.defaultAgent")(() => Effect.succeed(Object.keys(full)[0]!)),
+      generate: Effect.fn("TestAgent.generate")(() => Effect.die(new Error("not implemented"))),
+    })
+  }
+
+  function combinedCaptureLayer(result: "continue" | "compact") {
+    return Layer.succeed(
+      SessionProcessorModule.SessionProcessor.Service,
+      SessionProcessorModule.SessionProcessor.Service.of({
+        create: Effect.fn("CaptureProcessor.create")((input) => {
+          const msg = input.assistantMessage
+          return Effect.succeed({
+            get message() {
+              return msg
+            },
+            updateToolCall: Effect.fn("CaptureProcessor.updateToolCall")(() => Effect.succeed(undefined)),
+            completeToolCall: Effect.fn("CaptureProcessor.completeToolCall")(() => Effect.void),
+            process: Effect.fn("CaptureProcessor.process")(() => Effect.succeed(result)),
+          } satisfies SessionProcessorModule.SessionProcessor.Handle)
+        }),
+      }),
+    )
+  }
+
+  function combinedRuntime(
+    result: "continue" | "compact",
+    agents: Record<string, Partial<Agent.Info>>,
+    provider = wide(),
+  ) {
+    const bus = Bus.layer
+    return ManagedRuntime.make(
+      Layer.mergeAll(SessionCompaction.layer, bus).pipe(
+        Layer.provide(provider.layer),
+        Layer.provide(SessionNs.defaultLayer),
+        Layer.provide(combinedCaptureLayer(result)),
+        Layer.provide(agentLayer(agents)),
+        Layer.provide(Plugin.defaultLayer),
+        Layer.provide(bus),
+        Layer.provide(Config.defaultLayer),
+        Layer.provide(Todo.defaultLayer),
+      ),
+    )
+  }
+
+  function runWithTodo<A, E>(fx: Effect.Effect<A, E, SessionNs.Service | Todo.Service>) {
+    return Effect.runPromise(fx.pipe(Effect.provide(SessionNs.defaultLayer), Effect.provide(Todo.defaultLayer)))
+  }
+
+  async function userMsgWithAgent(sessionID: SessionID, text: string, agent: string) {
+    const msg = await svc.updateMessage({
+      id: MessageID.ascending(),
+      role: "user",
+      sessionID,
+      agent,
+      model: ref,
+      time: { created: Date.now() },
+    })
+    await svc.updatePart({
+      id: PartID.ascending(),
+      messageID: msg.id,
+      sessionID,
+      type: "text",
+      text,
+    })
+    return msg
+  }
+
+  test("strengthened identity reinforcement in auto-continue", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const rt = combinedRuntime("continue", {
+          myagent: {
+            native: false,
+            prompt: "You are a conversational agent",
+            description: "Conversational agent that helps users",
+          },
+          compaction: { native: true },
+        })
+        try {
+          const session = await svc.create({})
+          const msg = await userMsgWithAgent(session.id, "hello", "myagent")
+          const msgs = await svc.messages({ sessionID: session.id })
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: true }),
+            ),
+          )
+          const all = await svc.messages({ sessionID: session.id })
+          const last = all.at(-1)
+          expect(last?.info.role).toBe("user")
+          const textPart = last?.parts.find((p) => p.type === "text" && p.text.includes("<system-reminder>"))
+          expect(textPart).toBeDefined()
+          if (textPart?.type === "text") {
+            expect(textPart.text).toContain("myagent")
+            expect(textPart.text).toContain("Conversational agent that helps users")
+          }
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
+
+  test("description fallback for agent without description", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const rt = combinedRuntime("continue", {
+          myagent: { native: false, prompt: "You are a helper agent" },
+          compaction: { native: true },
+        })
+        try {
+          const session = await svc.create({})
+          const msg = await userMsgWithAgent(session.id, "hello", "myagent")
+          const msgs = await svc.messages({ sessionID: session.id })
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: true }),
+            ),
+          )
+          const all = await svc.messages({ sessionID: session.id })
+          const last = all.at(-1)
+          expect(last?.info.role).toBe("user")
+          const textPart = last?.parts.find((p) => p.type === "text" && p.text.includes("<system-reminder>"))
+          expect(textPart).toBeDefined()
+          if (textPart?.type === "text") {
+            expect(textPart.text).toContain("a specialized agent")
+          }
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
+
+  test("native agent exclusion — no system-reminder", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const rt = combinedRuntime("continue", {
+          build: { native: true, prompt: "Built-in agent prompt" },
+          compaction: { native: true },
+        })
+        try {
+          const session = await svc.create({})
+          const msg = await userMsgWithAgent(session.id, "hello", "build")
+          const msgs = await svc.messages({ sessionID: session.id })
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: true }),
+            ),
+          )
+          const all = await svc.messages({ sessionID: session.id })
+          const last = all.at(-1)
+          expect(last?.info.role).toBe("user")
+          const hasReminder = last?.parts.some((p) => p.type === "text" && p.text.includes("<system-reminder>"))
+          expect(hasReminder ?? false).toBe(false)
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
+
+  test("double compaction produces fresh identity and todo state", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const rt = combinedRuntime("continue", {
+          myagent: { native: false, prompt: "You are a reviewer", description: "Code review specialist" },
+          compaction: { native: true },
+        })
+        try {
+          const session = await svc.create({})
+          await runWithTodo(
+            Todo.Service.use((svc) =>
+              svc.update({
+                sessionID: session.id,
+                todos: [{ content: "Review PR #1", status: "pending", priority: "high" }],
+              }),
+            ),
+          )
+
+          // First compaction
+          const msg1 = await userMsgWithAgent(session.id, "first message", "myagent")
+          const msgs1 = await svc.messages({ sessionID: session.id })
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({ parentID: msg1.id, messages: msgs1, sessionID: session.id, auto: true }),
+            ),
+          )
+
+          // Update todos between compactions
+          await runWithTodo(
+            Todo.Service.use((svc) =>
+              svc.update({
+                sessionID: session.id,
+                todos: [
+                  { content: "Review PR #1", status: "completed", priority: "high" },
+                  { content: "Deploy to staging", status: "pending", priority: "medium" },
+                ],
+              }),
+            ),
+          )
+
+          // Second compaction — need a new user message as parent
+          const msg2 = await userMsgWithAgent(session.id, "continue working", "myagent")
+          const msgs2 = await svc.messages({ sessionID: session.id })
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({ parentID: msg2.id, messages: msgs2, sessionID: session.id, auto: true }),
+            ),
+          )
+
+          const all = await svc.messages({ sessionID: session.id })
+          const last = all.at(-1)
+          expect(last?.info.role).toBe("user")
+          const textParts = last?.parts.filter((p) => p.type === "text") ?? []
+          const fullText = textParts.map((p) => (p.type === "text" ? p.text : "")).join("\n")
+          // Fresh identity reinforcement
+          expect(fullText).toContain("<system-reminder>")
+          expect(fullText).toContain("myagent")
+          expect(fullText).toContain("Code review specialist")
+          // Fresh todo state from second update
+          expect(fullText).toContain("## Current Task List")
+          expect(fullText).toContain("Deploy to staging")
+          // Req 4.4: summary assistant message must have non-error finish
+          const summaryMsgs = all.filter((m) => m.info.role === "assistant" && "summary" in m.info && m.info.summary)
+          expect(summaryMsgs.length).toBeGreaterThanOrEqual(2)
+          const lastSummary = summaryMsgs.at(-1)!
+          expect(lastSummary.info.role).toBe("assistant")
+          if (lastSummary.info.role === "assistant") {
+            expect(lastSummary.info.finish).not.toBe("error")
+          }
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
+
+  test("replay-path todo injection with overflow", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const rt = combinedRuntime("continue", {
+          myagent: { native: false, prompt: "You are a reviewer", description: "Code review specialist" },
+          compaction: { native: true },
+        })
+        try {
+          const session = await svc.create({})
+          await runWithTodo(
+            Todo.Service.use((svc) =>
+              svc.update({
+                sessionID: session.id,
+                todos: [
+                  { content: "Fix the login bug", status: "pending", priority: "high" },
+                  { content: "Write unit tests", status: "in_progress", priority: "medium" },
+                ],
+              }),
+            ),
+          )
+
+          // Need enough messages so the replay path finds a non-compaction user
+          // message at index > 0, making messages.slice(0, i) non-empty with
+          // at least one non-compaction user message (for hasContent to be true).
+          // Layout: user0 → assistant0 → user1("replay me") → assistant1 → user2(parent)
+          const msg0 = await userMsgWithAgent(session.id, "initial setup", "myagent")
+          await svc.updateMessage({
+            id: MessageID.ascending(),
+            role: "assistant",
+            sessionID: session.id,
+            mode: "build" as const,
+            agent: "myagent",
+            path: { cwd: tmp.path, root: tmp.path },
+            cost: 0,
+            tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            modelID: ref.modelID,
+            providerID: ref.providerID,
+            parentID: msg0.id,
+            time: { created: Date.now() },
+            finish: "end_turn",
+          } satisfies MessageV2.Assistant)
+          const msg1 = await userMsgWithAgent(session.id, "replay me", "myagent")
+          await svc.updateMessage({
+            id: MessageID.ascending(),
+            role: "assistant",
+            sessionID: session.id,
+            mode: "build" as const,
+            agent: "myagent",
+            path: { cwd: tmp.path, root: tmp.path },
+            cost: 0,
+            tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            modelID: ref.modelID,
+            providerID: ref.providerID,
+            parentID: msg1.id,
+            time: { created: Date.now() },
+            finish: "end_turn",
+          } satisfies MessageV2.Assistant)
+          const msg2 = await userMsgWithAgent(session.id, "trigger overflow", "myagent")
+
+          const msgs = await svc.messages({ sessionID: session.id })
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({
+                parentID: msg2.id,
+                messages: msgs,
+                sessionID: session.id,
+                auto: true,
+                overflow: true,
+              }),
+            ),
+          )
+
+          const all = await svc.messages({ sessionID: session.id })
+          const userMsgs = all.filter((m) => m.info.role === "user")
+          const lastUser = userMsgs.at(-1)
+          expect(lastUser).toBeDefined()
+
+          // The replayed message should contain the original text from "replay me"
+          const allParts = lastUser?.parts ?? []
+          const nonSyntheticText = allParts
+            .filter((p) => p.type === "text" && !("synthetic" in p && p.synthetic))
+            .map((p) => (p.type === "text" ? p.text : ""))
+            .join("\n")
+          expect(nonSyntheticText).toContain("replay me")
+
+          // Verify identity reinforcement via synthetic parts (Req 1.4)
+          const syntheticParts = allParts.filter((p) => p.type === "text" && "synthetic" in p && p.synthetic)
+          const syntheticText = syntheticParts.map((p) => (p.type === "text" ? p.text : "")).join("\n")
+          expect(syntheticText).toContain("<system-reminder>")
+          expect(syntheticText).toContain("myagent")
+
+          // Verify todo injection via synthetic parts (Req 2.5)
+          expect(syntheticText).toContain("## Current Task List")
+          expect(syntheticText).toContain("Fix the login bug")
+          expect(syntheticText).toContain("Write unit tests")
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
+})
+
 describe("buildIdentityReinforcement", () => {
   function makeAgent(overrides: Partial<Agent.Info> = {}): Agent.Info {
     return {
