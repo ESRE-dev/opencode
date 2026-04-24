@@ -69,6 +69,14 @@ export function buildIdentityReinforcement(agentName: string, source: Agent.Info
   return `<system-reminder>\nYou are the "${agentName}" agent.\nRole: ${description}\nYour role and constraints from your system prompt still apply after this compaction.\nContinue performing your designated role. Do not switch to code implementation or deviate from your assigned responsibilities.\n</system-reminder>`
 }
 
+export function buildPostCompactionContext(reminder: string | undefined, todos: Todo.Info[]): string | undefined {
+  const todoSection = formatTodos(todos)
+  if (!reminder && !todoSection) return undefined
+  if (!reminder) return todoSection?.trimStart()
+  if (!todoSection) return reminder
+  return reminder + "\n\n" + todoSection.trimStart()
+}
+
 export const layer: Layer.Layer<
   Service,
   never,
@@ -333,8 +341,9 @@ When constructing the summary, try to stick to this template:
       }
 
       if (result === "continue" && input.auto) {
-        // Inject post-compaction agent identity reminder for specialized agents
+        // Inject post-compaction agent identity reminder and todo state
         const reminder = buildIdentityReinforcement(userMessage.agent, source)
+        const postContext = buildPostCompactionContext(reminder, todos)
         if (replay) {
           const original = replay.info
           const replayMsg = yield* session.updateMessage({
@@ -361,14 +370,14 @@ When constructing the summary, try to stick to this template:
               sessionID: input.sessionID,
             })
           }
-          if (reminder) {
+          if (postContext) {
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: replayMsg.id,
               sessionID: input.sessionID,
               type: "text",
               synthetic: true,
-              text: reminder,
+              text: postContext,
               time: { start: Date.now(), end: Date.now() },
             })
           }
@@ -417,7 +426,7 @@ When constructing the summary, try to stick to this template:
               // This is not a stable plugin contract and may change or disappear.
               metadata: { compaction_continue: true },
               synthetic: true,
-              text: reminder ? text + "\n\n" + reminder : text,
+              text: postContext ? text + "\n\n" + postContext : text,
               time: {
                 start: Date.now(),
                 end: Date.now(),

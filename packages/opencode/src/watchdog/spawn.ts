@@ -7,7 +7,10 @@ import { Config } from "../config"
 import { Provider } from "../provider"
 import { ModelID, ProviderID } from "../provider/schema"
 import type { SessionID } from "../session/schema"
-import { AppRuntime } from "../effect/app-runtime"
+
+// Lazy import to break circular dependency:
+// processor.ts → watchdog/spawn.ts → app-runtime.ts → processor.ts
+const getAppRuntime = () => import("../effect/app-runtime").then((m) => m.AppRuntime)
 
 export interface WatchdogResult {
   action: "none" | "reprompted" | "cancelled"
@@ -24,6 +27,7 @@ export const WATCHDOG_MODELS: Record<string, string> = {
 const HARD_TIMEOUT = 60_000
 
 async function resolveModel() {
+  const AppRuntime = await getAppRuntime()
   const cfg = await AppRuntime.runPromise(Config.Service.use((svc) => svc.get()))
   const watchdog = cfg.experimental?.watchdog?.model
   if (watchdog) {
@@ -48,6 +52,7 @@ export async function spawnWatchdog(input: SpawnInput): Promise<WatchdogResult> 
     }
   }
 
+  const AppRuntime = await getAppRuntime()
   const child = await AppRuntime.runPromise(
     Session.Service.use((svc) => svc.create({ parentID: input.parentSessionID })),
   )

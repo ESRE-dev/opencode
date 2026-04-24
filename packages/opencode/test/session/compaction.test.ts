@@ -8,6 +8,7 @@ import { Config } from "../../src/config"
 import { Agent } from "../../src/agent/agent"
 import { LLM } from "../../src/session/llm"
 import { SessionCompaction, buildIdentityReinforcement } from "../../src/session/compaction"
+import { Todo } from "../../src/session/todo"
 import { Token } from "../../src/util"
 import { Instance } from "../../src/project/instance"
 import { Log } from "../../src/util"
@@ -178,6 +179,7 @@ function runtime(result: "continue" | "compact", plugin = Plugin.defaultLayer, p
       Layer.provide(plugin),
       Layer.provide(bus),
       Layer.provide(Config.defaultLayer),
+      Layer.provide(Todo.defaultLayer),
     ),
   )
 }
@@ -189,6 +191,7 @@ const deps = Layer.mergeAll(
   Plugin.defaultLayer,
   Bus.layer,
   Config.defaultLayer,
+  Todo.defaultLayer,
 )
 
 const env = Layer.mergeAll(
@@ -237,6 +240,7 @@ function liveRuntime(layer: Layer.Layer<LLM.Service>, provider = ProviderTest.fa
       Layer.provide(status),
       Layer.provide(bus),
       Layer.provide(Config.defaultLayer),
+      Layer.provide(Todo.defaultLayer),
     ),
   )
 }
@@ -1560,18 +1564,8 @@ describe("session.compaction.agentAware", () => {
             get message() {
               return msg
             },
-            abort: Effect.fn("CaptureProcessor.abort")(() => Effect.void),
-            partFromToolCall() {
-              return {
-                id: PartID.ascending(),
-                messageID: msg.id,
-                sessionID: msg.sessionID,
-                type: "tool" as const,
-                callID: "fake",
-                tool: "fake",
-                state: { status: "pending" as const, input: {}, raw: "" },
-              }
-            },
+            updateToolCall: Effect.fn("CaptureProcessor.updateToolCall")(() => Effect.succeed(undefined)),
+            completeToolCall: Effect.fn("CaptureProcessor.completeToolCall")(() => Effect.void),
             process: Effect.fn("CaptureProcessor.process")((args: any) => {
               captured.system = args.system
               return Effect.succeed(result)
@@ -1599,6 +1593,7 @@ describe("session.compaction.agentAware", () => {
         Layer.provide(pluginLayer),
         Layer.provide(bus),
         Layer.provide(Config.defaultLayer),
+        Layer.provide(Todo.defaultLayer),
       ),
     )
   }
