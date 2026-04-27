@@ -1,5 +1,4 @@
-import z from "zod"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import * as Tool from "../tool/tool"
 import { Database, eq, sql, desc } from "../storage"
 import { PartTable, MessageTable, SessionTable } from "../session/session.sql"
@@ -13,17 +12,17 @@ function scope(id: string, ctx: Tool.Context) {
   if (id !== stuck) throw new Error(`Scope violation: tool targets ${id} but watchdog is scoped to ${stuck}`)
 }
 
-const queryParams = z.object({
-  session_id: z.string().describe("Session ID to query"),
-  query: z.enum(["latest_message", "running_tools", "latest_parts", "session_tree", "lifecycle_pairs"]),
+const QueryParameters = Schema.Struct({
+  session_id: Schema.String.annotate({ description: "Session ID to query" }),
+  query: Schema.Literals(["latest_message", "running_tools", "latest_parts", "session_tree", "lifecycle_pairs"]),
 })
 
 export const WatchdogQueryTool = Tool.define(
   "watchdog_query",
   Effect.succeed({
     description: "Query the database for stuck session state. SELECT-only — no mutations.",
-    parameters: queryParams,
-    execute: (args: z.infer<typeof queryParams>, ctx: Tool.Context) =>
+    parameters: QueryParameters,
+    execute: (args: Schema.Schema.Type<typeof QueryParameters>, ctx: Tool.Context) =>
       Effect.gen(function* () {
         scope(args.session_id, ctx)
         const sid = args.session_id as SessionID
@@ -92,16 +91,16 @@ export const WatchdogQueryTool = Tool.define(
   }),
 )
 
-const activityParams = z.object({
-  session_id: z.string().describe("Session ID to check"),
+const ActivityParameters = Schema.Struct({
+  session_id: Schema.String.annotate({ description: "Session ID to check" }),
 })
 
 export const WatchdogActivityTool = Tool.define(
   "watchdog_activity",
   Effect.succeed({
     description: "Check when the last new part was created for a session.",
-    parameters: activityParams,
-    execute: (args: z.infer<typeof activityParams>, ctx: Tool.Context) =>
+    parameters: ActivityParameters,
+    execute: (args: Schema.Schema.Type<typeof ActivityParameters>, ctx: Tool.Context) =>
       Effect.gen(function* () {
         scope(args.session_id, ctx)
         const sid = args.session_id as SessionID
@@ -119,17 +118,17 @@ export const WatchdogActivityTool = Tool.define(
   }),
 )
 
-const cancelParams = z.object({
-  session_id: z.string().describe("Session ID to cancel — must match the stuck session from context"),
-  reason: z.string().describe("Full diagnostic report: failure mode, evidence, recommendation"),
+const CancelParameters = Schema.Struct({
+  session_id: Schema.String.annotate({ description: "Session ID to cancel — must match the stuck session from context" }),
+  reason: Schema.String.annotate({ description: "Full diagnostic report: failure mode, evidence, recommendation" }),
 })
 
 export const WatchdogCancelTool = Tool.define(
   "watchdog_cancel",
   Effect.succeed({
     description: "Cancel the stuck session with a diagnostic report after confirming no recovery.",
-    parameters: cancelParams,
-    execute: (args: z.infer<typeof cancelParams>, ctx: Tool.Context) =>
+    parameters: CancelParameters,
+    execute: (args: Schema.Schema.Type<typeof CancelParameters>, ctx: Tool.Context) =>
       Effect.gen(function* () {
         scope(args.session_id, ctx)
         const sid = args.session_id as SessionID
@@ -154,17 +153,17 @@ export const WatchdogCancelTool = Tool.define(
   }),
 )
 
-const repromptParams = z.object({
-  session_id: z.string().describe("Session ID to nudge — must be a Layer 2/3 stall, not Layer 1"),
-  message: z.string().describe("Nudge message to send"),
+const RepromptParameters = Schema.Struct({
+  session_id: Schema.String.annotate({ description: "Session ID to nudge — must be a Layer 2/3 stall, not Layer 1" }),
+  message: Schema.String.annotate({ description: "Nudge message to send" }),
 })
 
 export const WatchdogRepromptTool = Tool.define(
   "watchdog_reprompt",
   Effect.succeed({
     description: "Send a nudge message to a stuck child session and poll for recovery.",
-    parameters: repromptParams,
-    execute: (args: z.infer<typeof repromptParams>, ctx: Tool.Context) =>
+    parameters: RepromptParameters,
+    execute: (args: Schema.Schema.Type<typeof RepromptParameters>, ctx: Tool.Context) =>
       Effect.gen(function* () {
         scope(args.session_id, ctx)
         const sid = args.session_id as SessionID
