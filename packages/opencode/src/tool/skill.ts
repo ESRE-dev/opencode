@@ -20,6 +20,21 @@ export const SkillTool = Tool.define(
       parameters: Parameters,
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
+          // skill-preamble idempotency guard: skills auto-loaded by the
+          // session prompt lifecycle are tracked in ctx.extra.loadedSkills.
+          // Short-circuit a model-issued skill tool-call for one already loaded.
+          const loaded = ctx.extra?.loadedSkills as Set<string> | undefined
+          if (loaded?.has(params.name)) {
+            return {
+              title: `Skill: ${params.name}`,
+              output: `Skill "${params.name}" is already loaded in this session.`,
+              metadata: {
+                name: params.name,
+                dir: "",
+              },
+            }
+          }
+
           const info = yield* skill
             .require(params.name)
             .pipe(Effect.catchTag("Skill.NotFoundError", (error) => Effect.die(new Error(error.message))))
@@ -41,6 +56,8 @@ export const SkillTool = Tool.define(
             signal: ctx.abort,
             limit: 10,
           })
+
+          loaded?.add(params.name)
 
           return {
             title: `Loaded skill: ${info.name}`,

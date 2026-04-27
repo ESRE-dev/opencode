@@ -39,6 +39,11 @@ export const Info = Schema.Struct({
   description: Schema.optional(Schema.String),
   location: Schema.String,
   content: Schema.String,
+  // skill-preamble: Cursor-rules-style auto-load metadata. `alwaysApply`
+  // marks a skill as always-on; `globs` auto-loads it when a matching file is
+  // touched. See classify() and session/prompt.ts auto-load lifecycle.
+  alwaysApply: Schema.Boolean.pipe(Schema.optional, Schema.withDecodingDefault(Effect.succeed(false))),
+  globs: Schema.Array(Schema.String).pipe(Schema.optional, Schema.withDecodingDefault(Effect.succeed([] as string[]))),
 })
 export type Info = Schema.Schema.Type<typeof Info>
 
@@ -50,11 +55,15 @@ const Issue = Schema.StructWithRest(
   [Schema.Record(Schema.String, Schema.Unknown)],
 )
 
-function isSkillFrontmatter(data: unknown): data is { name: string; description?: string } {
+function isSkillFrontmatter(
+  data: unknown,
+): data is { name: string; description?: string; alwaysApply?: boolean; globs?: string[] } {
   return (
     isRecord(data) &&
     typeof data.name === "string" &&
-    (data.description === undefined || typeof data.description === "string")
+    (data.description === undefined || typeof data.description === "string") &&
+    (data.alwaysApply === undefined || typeof data.alwaysApply === "boolean") &&
+    (data.globs === undefined || (Array.isArray(data.globs) && data.globs.every((g) => typeof g === "string")))
   )
 }
 
@@ -136,6 +145,8 @@ const add = Effect.fnUntraced(function* (state: State, match: string, events: Ev
     description: md.data.description,
     location: match,
     content: md.content,
+    alwaysApply: md.data.alwaysApply ?? false,
+    globs: md.data.globs ?? [],
   }
 })
 
@@ -280,6 +291,8 @@ const layer = Layer.effect(
           description: CUSTOMIZE_OPENCODE_SKILL_DESCRIPTION,
           location: "<built-in>",
           content: CUSTOMIZE_OPENCODE_SKILL_BODY,
+          alwaysApply: false,
+          globs: [],
         }
         yield* loadSkills(s, yield* InstanceState.get(discovered), events)
         return s
@@ -350,5 +363,15 @@ export const node = LayerNode.make({
   layer: layer,
   deps: [Discovery.node, Config.node, EventV2Bridge.node, FSUtil.node, Global.node, RuntimeFlags.node],
 })
+
+export function classify(skill: Info, files: string[]): "auto" | "on-demand" {
+  if (skill.alwaysApply) return "auto"
+  for (const pattern of skill.globs ?? []) {
+    for (const file of files) {
+      if (Glob.match(pattern, file)) return "auto"
+    }
+  }
+  return "on-demand"
+}
 
 export * as Skill from "."
