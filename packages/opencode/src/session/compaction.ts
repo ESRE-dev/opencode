@@ -11,6 +11,7 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
+import { Todo } from "./todo"
 
 import { Effect, Layer, Context } from "effect"
 import * as DateTime from "effect/DateTime"
@@ -85,6 +86,20 @@ function completedCompactions(messages: SessionV1.WithParts[]) {
     if (userIndex === undefined) return []
     return [{ userIndex, assistantIndex, summary: summaryText(msg) }]
   })
+}
+
+export function formatTodos(todos: Todo.Info[]): string | undefined {
+  if (todos.length === 0) return undefined
+  const items = todos.map((t) => `- [${t.status}] (${t.priority}) ${t.content}`).join("\n")
+  return `\n\n## Current Task List\nThe agent is tracking the following tasks (persisted in the database — these survive compaction):\n${items}`
+}
+
+export function buildPostCompactionContext(reminder: string | undefined, todos: Todo.Info[]): string | undefined {
+  const todoSection = formatTodos(todos)
+  if (!reminder && !todoSection) return undefined
+  if (!reminder) return todoSection?.trimStart()
+  if (!todoSection) return reminder
+  return reminder + "\n\n" + todoSection.trimStart()
 }
 
 function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model }) {
@@ -174,6 +189,7 @@ export const layer = Layer.effect(
     const provider = yield* Provider.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const todo = yield* Todo.Service
 
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: SessionV1.Assistant["tokens"]
@@ -349,13 +365,16 @@ export const layer = Layer.effect(
         cfg,
         model,
       })
+      const todos = yield* todo.get(input.sessionID)
+      const todoSection = formatTodos(todos)
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
         { sessionID: input.sessionID },
         { context: [], prompt: undefined },
       )
-      const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
+      const basePrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
+      const nextPrompt = todoSection ? basePrompt + todoSection : basePrompt
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
       const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
@@ -442,6 +461,12 @@ export const layer = Layer.effect(
       }
 
       if (result === "continue" && input.auto) {
+        // Inject post-compaction agent identity reminder and todo state.
+        // buildIdentityReinforcement is provided by the sibling branch
+        // local/compaction-agent-identity; this branch consumes it.
+        const source = yield* agents.get(userMessage.agent)
+        const reminder = buildIdentityReinforcement(userMessage.agent, source)
+        const postContext = buildPostCompactionContext(reminder, todos)
         if (replay) {
           const original = replay.info
           const replayMsg = yield* session.updateMessage({
@@ -466,6 +491,17 @@ export const layer = Layer.effect(
               id: PartID.ascending(),
               messageID: replayMsg.id,
               sessionID: input.sessionID,
+            })
+          }
+          if (postContext) {
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: replayMsg.id,
+              sessionID: input.sessionID,
+              type: "text",
+              synthetic: true,
+              text: postContext,
+              time: { start: Date.now(), end: Date.now() },
             })
           }
         }
@@ -515,7 +551,7 @@ export const layer = Layer.effect(
               // This is not a stable plugin contract and may change or disappear.
               metadata: { compaction_continue: true },
               synthetic: true,
-              text,
+              text: postContext ? text + "\n\n" + postContext : text,
               time: {
                 start: Date.now(),
                 end: Date.now(),
@@ -603,6 +639,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Config.defaultLayer),
     Layer.provide(RuntimeFlags.defaultLayer),
     Layer.provide(EventV2Bridge.defaultLayer),
+    Layer.provide(Todo.defaultLayer),
   ),
 )
 
@@ -615,6 +652,7 @@ export const node = LayerNode.make(layer, [
   Provider.node,
   EventV2Bridge.node,
   RuntimeFlags.node,
+  Todo.node,
 ])
 
 export * as SessionCompaction from "./compaction"
