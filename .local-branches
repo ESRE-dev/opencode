@@ -10,6 +10,7 @@
 local/compaction-agent-identity
 local/subagent-hardening
 local/compaction-todo
+local/compaction-thinking-signature
 local/cancel-propagation
 local/build-command
 local/tool-timeout
