@@ -6,7 +6,8 @@ This is **ESRE-dev's fork** of [anomalyco/opencode](https://github.com/anomalyco
 We carry local improvements that upstream is slow to adopt. All local work
 lives in isolated topic branches that are independently rebased onto the
 upstream default branch, then merged into an ephemeral integration branch
-for deployment.
+(`local-integrated`) for deployment. `origin/HEAD` points at
+`origin/local-integrated`.
 
 ## Remotes
 
@@ -31,11 +32,31 @@ git switch dev && git reset --hard upstream/dev
 Each `local/*` branch carries one concern and is independently rebased
 onto `dev`. One concern per branch — no cross-cutting changes.
 
-### `local-dev` — ephemeral integration branch
+### `local-integrated` — ephemeral integration branch
 
 Rebuilt from scratch every sync cycle. Start at `dev`, then merge each
-`local/*` with `--no-ff`. This is the deployable ref. Never commit to it
-directly — always rebuild.
+`local/*` with `--no-ff`. This is the deployable ref and `origin/HEAD`.
+Never commit to it directly — always rebuild.
+
+> **Heads-up — naming drift:** the integration branch was originally
+> `local-dev` and was renamed to `local-integrated` mid-cycle. The
+> automation scripts (`rebuild-local-dev.sh`) and their internal
+> messages still reference the old name and are scheduled to be
+> renamed in lockstep. Until that is fixed, the rebuild scripts target
+> the wrong ref — operate the integration branch manually
+> (`git switch local-integrated && git reset --hard upstream/dev` then
+> `git merge --no-ff <branch>` per manifest entry) or run the script
+> and rename the ref afterwards.
+
+### `local-dev` — bd (beads) backup branch (repurposed)
+
+After the integration branch was renamed to `local-integrated`, the
+`local-dev` ref was repurposed to hold the `bd sync` backup snapshots
+for the beads issue tracker. Each commit is named
+`bd: backup YYYY-MM-DD HH:MM` and only touches `.beads/backup/*`.
+**Do not merge into code branches and do not rebuild from
+`upstream/dev`.** Treat it as an append-only backup log written by
+`bd sync`.
 
 ### `meta` — fork tooling (this branch)
 
@@ -55,11 +76,12 @@ Source branches for open upstream PRs (e.g. `origin/pr/session-watchdog`
 → PR #20104). **Do not delete while PRs are open.** These are simpler,
 upstreamable versions of features that may also exist in richer form as
 `local/*` branches. `rebase-branches.sh` auto-discovers and rebases any
-local `pr/*` branches alongside the manifest.
+local `pr/*` branches alongside the manifest. `pr/*` branches are
+**not** merged into `local-integrated`.
 
 > **Note:** `local/session-watchdog` is a PR-only branch
 > (`origin/pr/session-watchdog`). It is **not** in `.local-branches`
-> and is **not** merged into `local-dev`. The richer
+> and is **not** merged into `local-integrated`. The richer
 > `local/intelligent-session-watchdog` supersedes it for local use.
 
 ## The Sync Cycle
@@ -96,7 +118,7 @@ This script:
 
 Use `--dry-run` to preview without changes.
 
-### Step 2: Rebuild local-dev
+### Step 2: Rebuild the integration branch
 
 ```bash
 ../opencode-maintain/scripts/rebuild-local-dev.sh
@@ -105,17 +127,25 @@ Use `--dry-run` to preview without changes.
 This script:
 
 - Verifies all manifest branches exist and are rebased onto `upstream/dev`
-- Hard-resets `local-dev` to `upstream/dev`
+- Hard-resets the integration ref to `upstream/dev`
 - Merges each `.local-branches` entry with `--no-ff` in listed order
 - Uses a temp worktree — **never touches your active checkouts**
-- On merge conflict: aborts, resets `local-dev`, exits with diagnosis
+- On merge conflict: aborts, resets the integration ref, exits with diagnosis
 
 Use `--dry-run` to preview the merge order.
+
+> **Script naming drift:** the script and its internal `update-ref` /
+> messages still target `local-dev`, which is now the bd backup ref
+> (see Branch Topology). Until the script is renamed/retargeted to
+> `local-integrated`, run it knowing it writes to the wrong branch
+> name and either fix the ref afterwards
+> (`git update-ref refs/heads/local-integrated <new-tip> && git update-ref -d refs/heads/local-dev`)
+> or rebuild manually.
 
 ### Step 3: Push (optional)
 
 ```bash
-git push origin local-dev --force-with-lease
+git push origin local-integrated --force-with-lease
 git push origin dev --force-with-lease
 ```
 
@@ -131,8 +161,8 @@ _As of 2026-04-17._
 
 Branches are listed in merge order (same as `.local-branches` manifest).
 
-| Branch                               | Commits | In local-dev | Purpose                                                                      |
-| ------------------------------------ | ------- | ------------ | ---------------------------------------------------------------------------- |
+| Branch                               | Commits | In local-integrated | Purpose                                                                      |
+| ------------------------------------ | ------- | ------------------- | ---------------------------------------------------------------------------- |
 | `local/compaction-agent-identity`    | 3       | ✅           | Preserve agent identity across compaction + prevent tool-call hallucinations |
 | `local/subagent-hardening`           | 1       | ✅           | Subagent error handling, permissions, question denial, webfetch fixes        |
 | `local/compaction-todo`              | 1       | ✅           | Inject TODO state into compaction summarizer prompt                          |
@@ -146,7 +176,7 @@ Branches are listed in merge order (same as `.local-branches` manifest).
 | `local/docs`                         | 1       | ✅           | 17-chapter tech stack guide, Starlight site, research notes                  |
 | `local/misc`                         | 1       | ✅           | gitignore, TodoReadTool, OPENCODE_SESSION_ID env var                         |
 
-### PR-only branches (not in local-dev)
+### PR-only branches (not in local-integrated)
 
 | Branch                      | Purpose                                     | Status       |
 | --------------------------- | ------------------------------------------- | ------------ |
@@ -171,12 +201,13 @@ Branches are listed in merge order (same as `.local-branches` manifest).
 git switch -C local/<name> dev
 # make changes, commit
 # add to .local-branches manifest on meta
-# rebuild local-dev
+# rebuild local-integrated
 ```
 
 ### Dropping a topic
 
-Remove from `.local-branches`, delete the branch, rebuild `local-dev`.
+Remove from `.local-branches`, delete the branch, rebuild
+`local-integrated`.
 
 ### Porting features from dev-safe
 
