@@ -46,21 +46,21 @@ export const TodoWriteTool = Tool.define<typeof Parameters, Metadata, Todo.Servi
   }),
 )
 
-export const ReadParameters = Schema.Struct({})
+const Empty = Schema.Struct({})
 
 type ReadMetadata = {
   todos: Todo.Info[]
 }
 
-export const TodoReadTool = Tool.define<typeof ReadParameters, ReadMetadata, Todo.Service>(
+export const TodoReadTool = Tool.define<typeof Empty, ReadMetadata, Todo.Service>(
   "todoread",
   Effect.gen(function* () {
     const todo = yield* Todo.Service
 
     return {
       description: DESCRIPTION_READ,
-      parameters: ReadParameters,
-      execute: (_params: Schema.Schema.Type<typeof ReadParameters>, ctx: Tool.Context<ReadMetadata>) =>
+      parameters: Empty,
+      execute: (_params: Schema.Schema.Type<typeof Empty>, ctx: Tool.Context<ReadMetadata>) =>
         Effect.gen(function* () {
           yield* ctx.ask({
             permission: "todoread",
@@ -78,6 +78,6 @@ export const TodoReadTool = Tool.define<typeof ReadParameters, ReadMetadata, Tod
             output: JSON.stringify(todos, null, 2),
           }
         }),
-    } satisfies Tool.DefWithoutID<typeof ReadParameters, ReadMetadata>
+    } satisfies Tool.DefWithoutID<typeof Empty, ReadMetadata>
   }),
 )
