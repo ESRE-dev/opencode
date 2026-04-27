@@ -29,6 +29,12 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   bypassAgentCheck: boolean
   messages: SessionV1.WithParts[]
   promptOps: TaskPromptOps
+  // skill-preamble: skills already auto-loaded for this session. Threaded into
+  // Tool.Context.extra so the skill tool can no-op a redundant model call.
+  loadedSkills?: Set<string>
+  // skill-preamble: invoked after a file-touching tool (read/write/edit) runs,
+  // so the session layer can glob-match and auto-load skills for that file.
+  onFileTool?: (filePath: string) => Effect.Effect<void>
 }) {
   const tools: Record<string, AITool> = {}
   const run = yield* EffectBridge.make()
@@ -43,7 +49,12 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     abort: options.abortSignal!,
     messageID: input.processor.message.id,
     callID: options.toolCallId,
-    extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps: input.promptOps },
+    extra: {
+      model: input.model,
+      bypassAgentCheck: input.bypassAgentCheck,
+      promptOps: input.promptOps,
+      loadedSkills: input.loadedSkills,
+    },
     agent: input.agent.name,
     messages: input.messages,
     metadata: (val) =>
@@ -90,6 +101,13 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               { args },
             )
             const result = yield* item.execute(args, ctx)
+            if (
+              input.onFileTool &&
+              ["read", "write", "edit", "multiedit"].includes(item.id) &&
+              typeof (args as { filePath?: unknown }).filePath === "string"
+            ) {
+              yield* input.onFileTool((args as { filePath: string }).filePath)
+            }
             const output = {
               ...result,
               attachments: result.attachments?.map((attachment) => ({
