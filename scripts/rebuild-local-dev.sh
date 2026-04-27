@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# rebuild-local-dev.sh — Rebuild the local-dev integration branch.
+# rebuild-local-dev.sh — Rebuild the local-integrated integration branch.
 #
 # Usage: ./scripts/rebuild-local-dev.sh [--dry-run]
 #
-# Reads .local-branches manifest and merges each branch into local-dev
-# with --no-ff, in listed order. local-dev is hard-reset to upstream/dev
-# first, so this is always a clean rebuild.
+# Reads .local-branches manifest and merges each branch into local-integrated
+# with --no-ff, in listed order. local-integrated is hard-reset to
+# upstream/dev first, so this is always a clean rebuild.
 #
 # Guards:
 #   - All manifest branches must exist
 #   - All manifest branches must be rebased onto current upstream/dev
 #   - No in-progress rebase on any manifest branch
-#   - local-dev must not be checked out in any worktree
+#   - local-integrated must not be checked out in any worktree
 #
 # Safe: uses a temp worktree for the merge work.
+#
+# The filename still reads `rebuild-local-dev.sh` for historical
+# continuity; the integration branch was originally named `local-dev`
+# and has since been renamed to `local-integrated`.
 
 set -euo pipefail
 
@@ -67,11 +71,11 @@ echo "    upstream/dev: ${UPSTREAM_DEV:0:12}"
 
 errors=0
 
-# Check local-dev not checked out in a worktree
+# Check local-integrated not checked out in a worktree
 while IFS= read -r wt_line; do
   wt_branch="$(echo "$wt_line" | sed -n 's/.*\[\(.*\)\].*/\1/p')"
-  if [[ "$wt_branch" == "local-dev" ]]; then
-    echo "ERROR: local-dev is checked out in a worktree: $wt_line"
+  if [[ "$wt_branch" == "local-integrated" ]]; then
+    echo "ERROR: local-integrated is checked out in a worktree: $wt_line"
     echo "       Check it out on a different branch first."
     ((errors++))
   fi
@@ -112,7 +116,7 @@ echo ""
 # --- Dry run ---
 
 if $DRY_RUN; then
-  echo "=== Dry Run: would merge these into local-dev ==="
+  echo "=== Dry Run: would merge these into local-integrated ==="
   for i in "${!branches[@]}"; do
     echo "    $((i+1)). ${branches[$i]}"
   done
@@ -120,35 +124,35 @@ if $DRY_RUN; then
   exit 0
 fi
 
-# --- Reset local-dev ---
+# --- Reset local-integrated ---
 
-echo "=== Resetting local-dev to upstream/dev ==="
+echo "=== Resetting local-integrated to upstream/dev ==="
 
-# Create or reset local-dev branch ref (without needing a checkout)
-git -C "$SCRIPT_DIR" update-ref refs/heads/local-dev "$UPSTREAM_DEV"
-echo "    local-dev reset to ${UPSTREAM_DEV:0:12}"
+# Create or reset local-integrated branch ref (without needing a checkout)
+git -C "$SCRIPT_DIR" update-ref refs/heads/local-integrated "$UPSTREAM_DEV"
+echo "    local-integrated reset to ${UPSTREAM_DEV:0:12}"
 
-# --- Create temp worktree on local-dev ---
+# --- Create temp worktree on local-integrated ---
 
-TEMP_WORKTREE="$(mktemp -d "${TMPDIR:-/tmp}/rebuild-localdev.XXXXXX")"
+TEMP_WORKTREE="$(mktemp -d "${TMPDIR:-/tmp}/rebuild-local-integrated.XXXXXX")"
 rm -rf "$TEMP_WORKTREE"
-git -C "$SCRIPT_DIR" worktree add "$TEMP_WORKTREE" local-dev --quiet 2>&1
+git -C "$SCRIPT_DIR" worktree add "$TEMP_WORKTREE" local-integrated --quiet 2>&1
 echo "    temp worktree at $TEMP_WORKTREE"
 echo ""
 
 # --- Merge loop ---
 
-echo "=== Merging branches into local-dev ==="
+echo "=== Merging branches into local-integrated ==="
 
 merged=0
 for branch in "${branches[@]}"; do
   echo "--- integrate: $branch ---"
   if git -C "$TEMP_WORKTREE" merge --no-ff "$branch" -m "integrate: $branch" --quiet 2>&1; then
     echo "    OK"
-    ((merged++))
+    ((++merged))
   else
     echo ""
-    echo "*** CONFLICT merging $branch into local-dev ***"
+    echo "*** CONFLICT merging $branch into local-integrated ***"
     echo ""
     echo "Conflicting files:"
     git -C "$TEMP_WORKTREE" diff --name-only --diff-filter=U 2>/dev/null | sed 's/^/    /'
@@ -158,9 +162,9 @@ for branch in "${branches[@]}"; do
     echo "  1. Resolve the conflict in the branch that was added later."
     echo "  2. Reorder branches in .local-branches to reduce overlap."
     echo ""
-    echo "Aborting merge and resetting local-dev to upstream/dev."
+    echo "Aborting merge and resetting local-integrated to upstream/dev."
     git -C "$TEMP_WORKTREE" merge --abort 2>/dev/null || true
-    git -C "$SCRIPT_DIR" update-ref refs/heads/local-dev "$UPSTREAM_DEV"
+    git -C "$SCRIPT_DIR" update-ref refs/heads/local-integrated "$UPSTREAM_DEV"
     exit 1
   fi
 done
@@ -170,7 +174,7 @@ done
 FINAL_SHA="$(git -C "$TEMP_WORKTREE" rev-parse HEAD)"
 
 echo ""
-echo "=== local-dev rebuilt ==="
+echo "=== local-integrated rebuilt ==="
 echo "    Base:     upstream/dev (${UPSTREAM_DEV:0:12})"
 echo "    Tip:      ${FINAL_SHA:0:12}"
 echo "    Branches: $merged merged"
@@ -180,4 +184,4 @@ for i in "${!branches[@]}"; do
   echo "      $((i+1)). ${branches[$i]}"
 done
 echo ""
-echo "    To deploy: git push origin local-dev --force-with-lease"
+echo "    To deploy: git push origin local-integrated --force-with-lease"
