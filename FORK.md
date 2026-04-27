@@ -38,30 +38,18 @@ Rebuilt from scratch every sync cycle. Start at `dev`, then merge each
 `local/*` with `--no-ff`. This is the deployable ref and `origin/HEAD`.
 Never commit to it directly — always rebuild.
 
-> **Heads-up — naming drift:** the integration branch was originally
-> `local-dev` and was renamed to `local-integrated` mid-cycle. The
-> automation scripts (`rebuild-local-dev.sh`) and their internal
-> messages still reference the old name and are scheduled to be
-> renamed in lockstep. Until that is fixed, the rebuild scripts target
-> the wrong ref — operate the integration branch manually
-> (`git switch local-integrated && git reset --hard upstream/dev` then
-> `git merge --no-ff <branch>` per manifest entry) or run the script
-> and rename the ref afterwards.
-
-### `local-dev` — bd (beads) backup branch (repurposed)
-
-After the integration branch was renamed to `local-integrated`, the
-`local-dev` ref was repurposed to hold the `bd sync` backup snapshots
-for the beads issue tracker. Each commit is named
-`bd: backup YYYY-MM-DD HH:MM` and only touches `.beads/backup/*`.
-**Do not merge into code branches and do not rebuild from
-`upstream/dev`.** Treat it as an append-only backup log written by
-`bd sync`.
+> **History note:** this branch was originally named `local-dev` and
+> was renamed to `local-integrated`. `origin/local-dev` still exists
+> as a stale snapshot of the pre-rename integration history but is no
+> longer rebuilt or pushed to. Local `local-dev` refs (which had been
+> auto-populated with `bd: backup` commits before the bd backup
+> override landed — see `BD_SETUP.md`) have been deleted.
 
 ### `meta` — fork tooling (this branch)
 
 Orphan branch. Fork-specific documentation and scripts. **Never merges
-into code branches.**
+into code branches.** See `BD_SETUP.md` for the beads / Dolt / backup
+policy.
 
 ### `origin/dev-safe` — archive
 
@@ -127,20 +115,15 @@ Use `--dry-run` to preview without changes.
 This script:
 
 - Verifies all manifest branches exist and are rebased onto `upstream/dev`
-- Hard-resets the integration ref to `upstream/dev`
+- Hard-resets `local-integrated` to `upstream/dev`
 - Merges each `.local-branches` entry with `--no-ff` in listed order
 - Uses a temp worktree — **never touches your active checkouts**
-- On merge conflict: aborts, resets the integration ref, exits with diagnosis
+- On merge conflict: aborts, resets `local-integrated`, exits with diagnosis
 
 Use `--dry-run` to preview the merge order.
 
-> **Script naming drift:** the script and its internal `update-ref` /
-> messages still target `local-dev`, which is now the bd backup ref
-> (see Branch Topology). Until the script is renamed/retargeted to
-> `local-integrated`, run it knowing it writes to the wrong branch
-> name and either fix the ref afterwards
-> (`git update-ref refs/heads/local-integrated <new-tip> && git update-ref -d refs/heads/local-dev`)
-> or rebuild manually.
+> The script's filename still reads `rebuild-local-dev.sh` for
+> historical continuity; its internal logic targets `local-integrated`.
 
 ### Step 3: Push (optional)
 
