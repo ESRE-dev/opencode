@@ -3,20 +3,34 @@
 # Lines starting with # are ignored. Blank lines are ignored.
 #
 # Ordering rationale:
-#   - foundational/infra patches first (subagent, compaction, cancel)
-#   - features in the middle
+#   - foundational/infra patches first (cancel, subagent, watchdog, tool, provider)
+#   - compaction stack as a sequential block (intra-stack dependencies)
+#   - features in the middle (skill-preamble, tui-navigation)
 #   - docs/misc last (least likely to conflict)
+#
+# Cross-branch dependencies (surfaced by 2026-04-27 catch-up Phase 1):
+#   - local/compaction-todo depends on local/compaction-agent-identity
+#     (consumes its buildIdentityReinforcement helper)
+#   - local/compaction-thinking-signature depends on the post-conversion
+#     loop owned by the compaction stack (.filter extends a loop those
+#     branches own / re-establish on the new upstream shape)
+#   - local/compaction-todo's watchdog/spawn.ts edits depend on
+#     local/intelligent-session-watchdog being in place
+#
+# CLEAN-vs-MANUAL verdicts (Phase 1 of 2026-04-27 catch-up) are recorded
+# in specs/2026-04-27-upstream-catchup/plans/local-<name>.md and the
+# bd epic opencode-dby.
 
-local/compaction-agent-identity
-local/subagent-hardening
-local/compaction-todo
-local/compaction-thinking-signature
 local/cancel-propagation
-local/build-command
+local/subagent-hardening
+local/intelligent-session-watchdog
 local/tool-timeout
 local/provider-fallback
-local/tui-navigation
-local/intelligent-session-watchdog
+local/compaction-agent-identity
+local/compaction-todo
+local/compaction-thinking-signature
 local/skill-preamble
+local/tui-navigation
+local/build-command
 local/docs
 local/misc
