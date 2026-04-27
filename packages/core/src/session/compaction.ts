@@ -15,6 +15,10 @@ const TOOL_OUTPUT_MAX_CHARS = 2_000
 const SUMMARY_OUTPUT_TOKENS = 4_096
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
+## Agent Role & Constraints
+
+[If the system prompt indicates a specialized agent role (e.g. evaluator, reviewer, judge, explorer, planner), state the agent name, its role, and any behavioral constraints (read-only, no implementation, output format requirements). If the agent is a general-purpose implementor, write "Default agent — no special constraints." Frame next steps in terms appropriate to the agent's role: evaluators should evaluate, reviewers should review, planners should plan — do NOT frame all agents as implementors.]
+
 ## Goal
 - [single-sentence task summary]
 
