@@ -303,7 +303,7 @@ export interface Hooks {
    * - `prompt`: If set, replaces the default compaction prompt entirely
    */
   "experimental.session.compacting"?: (
-    input: { sessionID: string },
+    input: { sessionID: string; agent?: string },
     output: { context: string[]; prompt?: string },
   ) => Promise<void>
   /**

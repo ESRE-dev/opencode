@@ -10,6 +10,8 @@ import { Config } from "@/config/config"
 import { Image } from "@/image/image"
 import { Agent } from "../../src/agent/agent"
 import { LLM } from "../../src/session/llm"
+// TODO(opencode-k4t): re-port local identity assertions (buildIdentityReinforcement,
+// agent-role section, tool-call->text conversion) onto upstream's rewritten harness.
 import { SessionCompaction } from "../../src/session/compaction"
 import { Token } from "@/util/token"
 import { Permission } from "../../src/permission"

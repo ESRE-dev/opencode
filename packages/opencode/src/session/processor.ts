@@ -426,7 +426,8 @@ export const layer = Layer.effect(
 
           case "tool-input-start":
             if (ctx.assistantMessage.summary) {
-              throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
+              yield* Effect.logWarning("ignoring tool call during summary generation", { tool: value.name })
+              return
             }
             yield* ensureToolCall(value)
             return
@@ -467,7 +468,8 @@ export const layer = Layer.effect(
 
           case "tool-call": {
             if (ctx.assistantMessage.summary) {
-              throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
+              yield* Effect.logWarning("ignoring tool call during summary generation", { tool: value.name })
+              return
             }
             const toolCall = yield* ensureToolCall(value)
             const input = isRecord(value.input) ? value.input : { value: value.input }

@@ -137,6 +137,12 @@ function splitTurn(input: {
   })
 }
 
+export function buildIdentityReinforcement(agentName: string, source: Agent.Info | undefined): string | undefined {
+  if (!source?.prompt || source?.native) return undefined
+  const description = source?.description || "a specialized agent"
+  return `<system-reminder>\nYou are the "${agentName}" agent.\nRole: ${description}\nYour role and constraints from your system prompt still apply after this compaction.\nContinue performing your designated role. Do not switch to code implementation or deviate from your assigned responsibilities.\n</system-reminder>`
+}
+
 export interface Interface {
   readonly isOverflow: (input: {
     tokens: SessionV1.Assistant["tokens"]
@@ -352,10 +358,18 @@ export const layer = Layer.effect(
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
-        { sessionID: input.sessionID },
+        { sessionID: input.sessionID, agent: userMessage.agent },
         { context: [], prompt: undefined },
       )
       const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
+      // Resolve the source agent to preserve its identity during compaction.
+      const source: Agent.Info | undefined = yield* agents.get(userMessage.agent)
+      const system: string[] = []
+      if (source?.prompt) {
+        const max = 4000
+        const truncated = source.prompt.length > max ? source.prompt.slice(0, max) + "\n[...truncated]" : source.prompt
+        system.push(truncated)
+      }
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
       const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
@@ -374,6 +388,26 @@ export const layer = Layer.effect(
                 toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
               }),
             )
+      // Convert structured tool-call/tool-result parts into plain text so the
+      // compaction model never sees tool markup and can't hallucinate tool calls.
+      for (const m of modelMessages) {
+        if (!Array.isArray(m.content)) continue
+        m.content = m.content.map((part: any) => {
+          if (part.type === "tool-call") {
+            const inputStr = typeof part.input === "string" ? part.input : JSON.stringify(part.input)
+            const truncatedInput = inputStr.length > 300 ? inputStr.slice(0, 300) + "... [truncated]" : inputStr
+            return { type: "text" as const, text: `[Called tool: ${part.toolName}]\n[Input: ${truncatedInput}]` }
+          }
+          if (part.type === "tool-result") {
+            const outputStr = typeof part.output === "string" ? part.output : JSON.stringify(part.output)
+            const truncatedOutput = outputStr.length > 500 ? outputStr.slice(0, 500) + "... [truncated]" : outputStr
+            return { type: "text" as const, text: `[Tool result: ${part.toolName}]\n${truncatedOutput}` }
+          }
+          return part
+        })
+      }
+      // Remove tool-role messages that are now empty or redundant after transformation.
+      const safeMessages = modelMessages.filter((m) => m.role !== "tool")
       const ctx = yield* InstanceState.context
       const msg: SessionV1.Assistant = {
         id: MessageID.ascending(),
@@ -412,15 +446,16 @@ export const layer = Layer.effect(
         agent,
         sessionID: input.sessionID,
         tools: {},
-        system: [],
+        system,
         messages: [
-          ...modelMessages,
+          ...safeMessages,
           {
             role: "user",
             content: [{ type: "text", text: nextPrompt }],
           },
         ],
         model,
+        toolChoice: "none",
       })
 
       if (result === "compact") {
@@ -442,6 +477,8 @@ export const layer = Layer.effect(
       }
 
       if (result === "continue" && input.auto) {
+        // Compute post-compaction agent identity reminder for specialized agents.
+        const reminder = buildIdentityReinforcement(userMessage.agent, source)
         if (replay) {
           const original = replay.info
           const replayMsg = yield* session.updateMessage({
@@ -466,6 +503,17 @@ export const layer = Layer.effect(
               id: PartID.ascending(),
               messageID: replayMsg.id,
               sessionID: input.sessionID,
+            })
+          }
+          if (reminder) {
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: replayMsg.id,
+              sessionID: input.sessionID,
+              type: "text",
+              synthetic: true,
+              text: reminder,
+              time: { start: Date.now(), end: Date.now() },
             })
           }
         }
@@ -515,7 +563,7 @@ export const layer = Layer.effect(
               // This is not a stable plugin contract and may change or disappear.
               metadata: { compaction_continue: true },
               synthetic: true,
-              text,
+              text: reminder ? text + "\n\n" + reminder : text,
               time: {
                 start: Date.now(),
                 end: Date.now(),
