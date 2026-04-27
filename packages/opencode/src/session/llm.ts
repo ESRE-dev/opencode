@@ -373,6 +373,7 @@ const live: Layer.Layer<
                             title: "Provider fallback activated",
                             message: `Switched to ${info.target}`,
                             variant: "warning",
+                            duration: 5000,
                           })
                           .pipe(Effect.ignore),
                       ),
