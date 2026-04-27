@@ -2190,6 +2190,313 @@ describe("session.compaction.process combined identity+todo", () => {
   })
 })
 
+describe("session.compaction.process reasoning-strip", () => {
+  // Helpers — modeled on session.compaction.agentAware. Reused inside this block
+  // so the suite can override the Agent layer (to register a "compaction" agent)
+  // and inject a capturing processor that records the messages array passed to
+  // processor.process. The captured messages are how we structurally assert the
+  // reasoning-strip invariant Property 4 (compaction call carries no reasoning
+  // parts when the call's model differs from any prior assistant message's model).
+  function agentLayer(agents: Record<string, Partial<Agent.Info>>) {
+    const full: Record<string, Agent.Info> = {}
+    for (const [name, info] of Object.entries(agents)) {
+      full[name] = {
+        name,
+        mode: "primary",
+        permission: [],
+        options: {},
+        ...info,
+      }
+    }
+    return Layer.mock(Agent.Service)({
+      get: Effect.fn("TestAgent.get")((name: string) => Effect.succeed(full[name]!)),
+      list: Effect.fn("TestAgent.list")(() => Effect.succeed(Object.values(full))),
+      defaultAgent: Effect.fn("TestAgent.defaultAgent")(() => Effect.succeed(Object.keys(full)[0]!)),
+      generate: Effect.fn("TestAgent.generate")(() => Effect.die(new Error("not implemented"))),
+    })
+  }
+
+  // captureMessagesLayer — the processor spy. Records every messages array
+  // passed to processor.process across all invocations (one entry per call,
+  // supports the double-compaction sequential test).
+  function captureMessagesLayer(result: "continue" | "compact", captured: { calls: any[][] }) {
+    return Layer.succeed(
+      SessionProcessorModule.SessionProcessor.Service,
+      SessionProcessorModule.SessionProcessor.Service.of({
+        create: Effect.fn("CaptureProcessor.create")((input) => {
+          const msg = input.assistantMessage
+          return Effect.succeed({
+            get message() {
+              return msg
+            },
+            updateToolCall: Effect.fn("CaptureProcessor.updateToolCall")(() => Effect.succeed(undefined)),
+            completeToolCall: Effect.fn("CaptureProcessor.completeToolCall")(() => Effect.void),
+            process: Effect.fn("CaptureProcessor.process")((args: any) => {
+              captured.calls.push(args.messages)
+              return Effect.succeed(result)
+            }),
+          } satisfies SessionProcessorModule.SessionProcessor.Handle)
+        }),
+      }),
+    )
+  }
+
+  function reasoningRuntime(
+    result: "continue" | "compact",
+    agents: Record<string, Partial<Agent.Info>>,
+    captured: { calls: any[][] },
+    provider = wide(),
+  ) {
+    const bus = Bus.layer
+    return ManagedRuntime.make(
+      Layer.mergeAll(SessionCompaction.layer, bus).pipe(
+        Layer.provide(provider.layer),
+        Layer.provide(SessionNs.defaultLayer),
+        Layer.provide(captureMessagesLayer(result, captured)),
+        Layer.provide(agentLayer(agents)),
+        Layer.provide(Plugin.defaultLayer),
+        Layer.provide(bus),
+        Layer.provide(Config.defaultLayer),
+        Layer.provide(Todo.defaultLayer),
+      ),
+    )
+  }
+
+  // Build an assistant message recorded with provided modelID/providerID. When
+  // the recorded model does NOT match the call's model, differentModel === true
+  // fires in message-v2.ts:692 and the conversion-site drop is exercised.
+  async function reasoningAssistant(
+    sessionID: SessionID,
+    parentID: MessageID,
+    root: string,
+    recordedModel: { providerID: ProviderID; modelID: ModelID },
+    text: string,
+    signature: string,
+  ) {
+    const assistantID = MessageID.ascending()
+    const msg: MessageV2.Assistant = {
+      id: assistantID,
+      role: "assistant",
+      sessionID,
+      mode: "build",
+      agent: "build",
+      path: { cwd: root, root },
+      cost: 0,
+      tokens: { output: 0, input: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: recordedModel.modelID,
+      providerID: recordedModel.providerID,
+      parentID,
+      time: { created: Date.now() },
+      finish: "end_turn",
+    }
+    await svc.updateMessage(msg)
+    await svc.updatePart({
+      id: PartID.ascending(),
+      sessionID,
+      messageID: assistantID,
+      type: "step-start",
+    })
+    await svc.updatePart({
+      id: PartID.ascending(),
+      sessionID,
+      messageID: assistantID,
+      type: "reasoning",
+      text: "internal chain-of-thought scratch work",
+      metadata: { anthropic: { signature } },
+      time: { start: Date.now() - 100, end: Date.now() - 50 },
+    })
+    await svc.updatePart({
+      id: PartID.ascending(),
+      sessionID,
+      messageID: assistantID,
+      type: "text",
+      text,
+    })
+    return msg
+  }
+
+  test("reasoning-history compaction with different model: no reasoning parts in captured messages", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const captured: { calls: any[][] } = { calls: [] }
+        // The compaction agent has no `model` configured -> falls back to
+        // userMessage.model = ref = "test/test-model" at compaction.ts:200-202.
+        // The assistant message below is recorded with a DIFFERENT model
+        // ("other-provider"/"other-model"), so differentModel === true fires
+        // for it during the conversion at compaction.ts:259.
+        const rt = reasoningRuntime("continue", {
+          build: { native: true },
+          compaction: { native: true },
+        }, captured)
+        try {
+          const session = await svc.create({})
+          const u = await user(session.id, "explain reasoning behavior")
+          await reasoningAssistant(
+            session.id,
+            u.id,
+            tmp.path,
+            { providerID: ProviderID.make("other-provider"), modelID: ModelID.make("other-model") },
+            "here is my analysis",
+            "SIG-INT-A",
+          )
+          const msgs = await svc.messages({ sessionID: session.id })
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({ parentID: u.id, messages: msgs, sessionID: session.id, auto: false }),
+            ),
+          )
+
+          // The capturing processor recorded exactly one process() call.
+          expect(captured.calls.length).toBe(1)
+          const messagesArg = captured.calls[0]!
+          expect(Array.isArray(messagesArg)).toBe(true)
+
+          // Property 4: across every assistant message in the captured array,
+          // there are zero reasoning content parts.
+          for (const m of messagesArg) {
+            if (!m || m.role !== "assistant") continue
+            if (!Array.isArray(m.content)) continue
+            const reasoningParts = m.content.filter((p: any) => p?.type === "reasoning")
+            expect(reasoningParts).toHaveLength(0)
+          }
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
+
+  test("reasoning-history compaction with same model: scrub still removes reasoning from compaction call", async () => {
+    // Note: this is the "scrub categorical-removal" assertion path. Even when
+    // the message-v2 drop does NOT fire (because models match at the conversion
+    // site), the compaction.ts:269-286 scrub still removes any surviving
+    // reasoning parts from the messages passed to processor.process. This is
+    // intentional: reasoning prose is internal scratch work, not load-bearing
+    // for the compaction summary, and removing it shrinks compaction context.
+    // The same-model conversion-site preservation property (Property 2) is
+    // validated separately at the unit level via message-v2.test.ts fixture B.
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const captured: { calls: any[][] } = { calls: [] }
+        const rt = reasoningRuntime("continue", {
+          build: { native: true },
+          compaction: { native: true },
+        }, captured)
+        try {
+          const session = await svc.create({})
+          const u = await user(session.id, "explain reasoning behavior")
+          // Same model recorded as ref -> differentModel === false at the
+          // conversion site, so the message-v2 drop does NOT fire and the
+          // reasoning part is initially passed through to the compaction loop
+          // with its signature intact. The scrub at compaction.ts:269-286 then
+          // removes it before processor.process is invoked.
+          await reasoningAssistant(
+            session.id,
+            u.id,
+            tmp.path,
+            ref,
+            "here is my analysis",
+            "SIG-INT-B",
+          )
+          const msgs = await svc.messages({ sessionID: session.id })
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({ parentID: u.id, messages: msgs, sessionID: session.id, auto: false }),
+            ),
+          )
+
+          expect(captured.calls.length).toBe(1)
+          const messagesArg = captured.calls[0]!
+          expect(Array.isArray(messagesArg)).toBe(true)
+
+          // Property 4 (extended): the compaction call carries no reasoning
+          // parts under any conversion-site outcome — the scrub is categorical.
+          for (const m of messagesArg) {
+            if (!m || m.role !== "assistant") continue
+            if (!Array.isArray(m.content)) continue
+            const reasoningParts = m.content.filter((p: any) => p?.type === "reasoning")
+            expect(reasoningParts).toHaveLength(0)
+          }
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
+
+  test("double compaction with different model: no reasoning parts in either captured messages call", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const captured: { calls: any[][] } = { calls: [] }
+        const rt = reasoningRuntime("continue", {
+          build: { native: true },
+          compaction: { native: true },
+        }, captured)
+        try {
+          const session = await svc.create({})
+
+          // First compaction
+          const u1 = await user(session.id, "first turn")
+          await reasoningAssistant(
+            session.id,
+            u1.id,
+            tmp.path,
+            { providerID: ProviderID.make("other-provider"), modelID: ModelID.make("other-model") },
+            "first analysis",
+            "SIG-DOUBLE-1",
+          )
+          const msgs1 = await svc.messages({ sessionID: session.id })
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({ parentID: u1.id, messages: msgs1, sessionID: session.id, auto: false }),
+            ),
+          )
+
+          // Second compaction. Add another user/assistant turn (with reasoning)
+          // recorded with a non-matching model so the second compaction's
+          // conversion also exercises differentModel === true.
+          const u2 = await user(session.id, "second turn")
+          await reasoningAssistant(
+            session.id,
+            u2.id,
+            tmp.path,
+            { providerID: ProviderID.make("other-provider"), modelID: ModelID.make("other-model") },
+            "second analysis",
+            "SIG-DOUBLE-2",
+          )
+          const msgs2 = await svc.messages({ sessionID: session.id })
+          await rt.runPromise(
+            SessionCompaction.Service.use((svc) =>
+              svc.process({ parentID: u2.id, messages: msgs2, sessionID: session.id, auto: false }),
+            ),
+          )
+
+          // Both compaction calls captured.
+          expect(captured.calls.length).toBe(2)
+
+          // Property 4 across both calls.
+          for (const messagesArg of captured.calls) {
+            for (const m of messagesArg) {
+              if (!m || m.role !== "assistant") continue
+              if (!Array.isArray(m.content)) continue
+              const reasoningParts = m.content.filter((p: any) => p?.type === "reasoning")
+              expect(reasoningParts).toHaveLength(0)
+            }
+          }
+        } finally {
+          await rt.dispose()
+        }
+      },
+    })
+  })
+})
+
 describe("buildIdentityReinforcement", () => {
   function makeAgent(overrides: Partial<Agent.Info> = {}): Agent.Info {
     return {

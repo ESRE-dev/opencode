@@ -787,11 +787,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
             })
         }
-        if (part.type === "reasoning") {
+        if (part.type === "reasoning" && !differentModel) {
           assistantMessage.parts.push({
             type: "reasoning",
             text: part.text,
-            ...(differentModel ? {} : { providerMetadata: part.metadata }),
+            providerMetadata: part.metadata,
           })
         }
       }

@@ -260,21 +260,29 @@ When constructing the summary, try to stick to this template:
 
       // Convert structured tool-call/tool-result parts into plain text so the
       // compaction model never sees tool markup and can't hallucinate tool calls.
+      // Filter out reasoning parts entirely — they cannot safely cross a model
+      // boundary (signatures are model-specific and the Anthropic API rejects
+      // echoed thinking blocks without their original signature). The conversion
+      // path at message-v2.ts:790-796 already drops reasoning parts when models
+      // differ; this filter is defense-in-depth against future plugin-ordering
+      // changes that could re-introduce the bypass.
       for (const msg of modelMessages) {
         if (!Array.isArray(msg.content)) continue
-        msg.content = msg.content.map((part: any) => {
-          if (part.type === "tool-call") {
-            const inputStr = typeof part.input === "string" ? part.input : JSON.stringify(part.input)
-            const truncatedInput = inputStr.length > 300 ? inputStr.slice(0, 300) + "... [truncated]" : inputStr
-            return { type: "text" as const, text: `[Called tool: ${part.toolName}]\n[Input: ${truncatedInput}]` }
-          }
-          if (part.type === "tool-result") {
-            const outputStr = typeof part.output === "string" ? part.output : JSON.stringify(part.output)
-            const truncatedOutput = outputStr.length > 500 ? outputStr.slice(0, 500) + "... [truncated]" : outputStr
-            return { type: "text" as const, text: `[Tool result: ${part.toolName}]\n${truncatedOutput}` }
-          }
-          return part
-        })
+        msg.content = msg.content
+          .filter((part: any) => part.type !== "reasoning")
+          .map((part: any) => {
+            if (part.type === "tool-call") {
+              const inputStr = typeof part.input === "string" ? part.input : JSON.stringify(part.input)
+              const truncatedInput = inputStr.length > 300 ? inputStr.slice(0, 300) + "... [truncated]" : inputStr
+              return { type: "text" as const, text: `[Called tool: ${part.toolName}]\n[Input: ${truncatedInput}]` }
+            }
+            if (part.type === "tool-result") {
+              const outputStr = typeof part.output === "string" ? part.output : JSON.stringify(part.output)
+              const truncatedOutput = outputStr.length > 500 ? outputStr.slice(0, 500) + "... [truncated]" : outputStr
+              return { type: "text" as const, text: `[Tool result: ${part.toolName}]\n${truncatedOutput}` }
+            }
+            return part
+          })
       }
       // Remove tool-role messages that are now empty or redundant after transformation
       const compactionMessages = modelMessages.filter((msg) => msg.role !== "tool")

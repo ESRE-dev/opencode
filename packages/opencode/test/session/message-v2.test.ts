@@ -863,6 +863,178 @@ describe("session.message-v2.toModelMessage", () => {
       },
     ])
   })
+  test("drops reasoning parts when models differ (mixed [reasoning, text])", async () => {
+    const assistantID = "m-assistant-diff-mixed"
+    const input: MessageV2.WithParts[] = [
+      {
+        info: assistantInfo(assistantID, "m-parent", undefined, {
+          providerID: "other-provider",
+          modelID: "other-model",
+        }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "reasoning",
+            text: "thinking prose",
+            metadata: { anthropic: { signature: "SIG-A" } },
+            time: { start: 0 },
+          },
+          {
+            ...basePart(assistantID, "a2"),
+            type: "text",
+            text: "visible answer",
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    expect(result).toHaveLength(1)
+    const assistantOut = result[0]
+    expect(assistantOut.role).toBe("assistant")
+    expect(Array.isArray(assistantOut.content)).toBe(true)
+    const content = assistantOut.content as Array<{ type: string; text?: string }>
+    expect(content.filter((p) => p.type === "reasoning")).toHaveLength(0)
+    expect(content.filter((p) => p.type === "text")).toHaveLength(1)
+    expect(content.find((p) => p.type === "text")?.text).toBe("visible answer")
+  })
+
+  test("preserves reasoning signature when models match (control [reasoning, text])", async () => {
+    const assistantID = "m-assistant-same-mixed"
+    const input: MessageV2.WithParts[] = [
+      {
+        info: assistantInfo(assistantID, "m-parent"),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "reasoning",
+            text: "thinking prose",
+            metadata: { anthropic: { signature: "SIG-B" } },
+            time: { start: 0 },
+          },
+          {
+            ...basePart(assistantID, "a2"),
+            type: "text",
+            text: "visible answer",
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    expect(result).toHaveLength(1)
+    const assistantOut = result[0]
+    const content = assistantOut.content as Array<{
+      type: string
+      text?: string
+      providerOptions?: { anthropic?: { signature?: string } }
+    }>
+    const reasoning = content.find((p) => p.type === "reasoning")
+    expect(reasoning).toBeDefined()
+    expect(reasoning!.text).toBe("thinking prose")
+    expect(reasoning!.providerOptions?.anthropic?.signature).toBe("SIG-B")
+  })
+
+  test("drops only reasoning when mixed with text + tool-call under different model", async () => {
+    const assistantID = "m-assistant-diff-three"
+    const input: MessageV2.WithParts[] = [
+      {
+        info: assistantInfo(assistantID, "m-parent", undefined, {
+          providerID: "other-provider",
+          modelID: "other-model",
+        }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "reasoning",
+            text: "thinking prose",
+            metadata: { anthropic: { signature: "SIG-C" } },
+            time: { start: 0 },
+          },
+          {
+            ...basePart(assistantID, "a2"),
+            type: "text",
+            text: "answer text",
+          },
+          {
+            ...basePart(assistantID, "a3"),
+            type: "tool",
+            callID: "call-c",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "ok",
+              title: "Bash",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const assistantOut = result.find((m) => m.role === "assistant")
+    expect(assistantOut).toBeDefined()
+    const content = assistantOut!.content as Array<{ type: string }>
+    expect(content.filter((p) => p.type === "reasoning")).toHaveLength(0)
+    expect(content.some((p) => p.type === "text")).toBe(true)
+    expect(content.some((p) => p.type === "tool-call")).toBe(true)
+  })
+
+  test("excludes assistant entirely when only [step-start, reasoning] survives drop (different model)", async () => {
+    const assistantID = "m-assistant-step-reasoning"
+    const input: MessageV2.WithParts[] = [
+      {
+        info: assistantInfo(assistantID, "m-parent", undefined, {
+          providerID: "other-provider",
+          modelID: "other-model",
+        }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "step-start",
+          },
+          {
+            ...basePart(assistantID, "a2"),
+            type: "reasoning",
+            text: "thinking prose",
+            metadata: { anthropic: { signature: "SIG-D" } },
+            time: { start: 0 },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    expect(result.find((m) => m.role === "assistant")).toBeUndefined()
+  })
+
+  test("excludes assistant entirely when only [reasoning] survives drop (different model)", async () => {
+    const assistantID = "m-assistant-only-reasoning"
+    const input: MessageV2.WithParts[] = [
+      {
+        info: assistantInfo(assistantID, "m-parent", undefined, {
+          providerID: "other-provider",
+          modelID: "other-model",
+        }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "reasoning",
+            text: "thinking prose",
+            metadata: { anthropic: { signature: "SIG-E" } },
+            time: { start: 0 },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    expect(result.find((m) => m.role === "assistant")).toBeUndefined()
+  })
+
 })
 
 describe("session.message-v2.fromError", () => {
