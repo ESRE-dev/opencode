@@ -144,11 +144,48 @@ echo ""
 
 echo "=== Merging branches into local-integrated ==="
 
+# Apply any post-merge patch for the just-merged branch.
+# Patches live at scripts/post-merge-patches/<branch-with-slashes-as-dashes>.patch
+# and address integration-time fixups that cannot live on the standalone branch
+# (typically because they extend code introduced by a sibling branch's merge).
+# Each applied patch produces an additional commit on local-integrated immediately
+# after the integrate merge.
+apply_post_merge_patch() {
+  local branch="$1"
+  local slug="${branch//\//-}"
+  local patch="$SCRIPT_DIR/post-merge-patches/${slug}.patch"
+  if [[ ! -f "$patch" ]]; then
+    return 0
+  fi
+  echo "    post-merge patch: $patch"
+  if ! git -C "$TEMP_WORKTREE" apply --check "$patch" 2>&1; then
+    echo "*** post-merge patch FAILED to apply cleanly for $branch ***"
+    echo "    patch: $patch"
+    echo "    The patch was authored against a known surface that has likely"
+    echo "    drifted upstream. Update the patch file or re-encode the fix"
+    echo "    on the owning branch."
+    return 1
+  fi
+  git -C "$TEMP_WORKTREE" apply "$patch"
+  git -C "$TEMP_WORKTREE" add -A
+  GIT_COMMITTER_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    git -C "$TEMP_WORKTREE" -c commit.gpgsign=false commit \
+      --no-verify --quiet \
+      -m "post-integrate: ${slug} (${patch##*/})" \
+      -m "Auto-applied by rebuild-local-dev.sh from $patch"
+  echo "    post-merge patch applied"
+}
+
 merged=0
 for branch in "${branches[@]}"; do
   echo "--- integrate: $branch ---"
   if git -C "$TEMP_WORKTREE" merge --no-ff "$branch" -m "integrate: $branch" --quiet 2>&1; then
     echo "    OK"
+    if ! apply_post_merge_patch "$branch"; then
+      echo "Aborting and resetting local-integrated to upstream/dev."
+      git -C "$SCRIPT_DIR" update-ref refs/heads/local-integrated "$UPSTREAM_DEV"
+      exit 1
+    fi
     ((++merged))
   else
     echo ""
