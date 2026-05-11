@@ -179,14 +179,17 @@ apply_post_merge_patch() {
 merged=0
 for branch in "${branches[@]}"; do
   echo "--- integrate: $branch ---"
-  if git -C "$TEMP_WORKTREE" merge --no-ff "$branch" -m "integrate: $branch" --quiet 2>&1; then
-    echo "    OK"
-    if ! apply_post_merge_patch "$branch"; then
-      echo "Aborting and resetting local-integrated to upstream/dev."
-      git -C "$SCRIPT_DIR" update-ref refs/heads/local-integrated "$UPSTREAM_DEV"
-      exit 1
-    fi
-    ((++merged))
+  merge_status=0
+  git -C "$TEMP_WORKTREE" merge --no-ff "$branch" -m "integrate: $branch" --quiet 2>&1 || merge_status=$?
+  unresolved="$(git -C "$TEMP_WORKTREE" diff --name-only --diff-filter=U)"
+  if [[ $merge_status -eq 0 ]]; then
+    echo "    OK (clean)"
+  elif [[ -z "$unresolved" ]]; then
+    # Merge exit was non-zero, but rerere (or auto-merge) resolved every
+    # conflict and staged the result. Finalize with a commit so the
+    # integrate-merge commit is produced.
+    git -C "$TEMP_WORKTREE" -c commit.gpgsign=false commit --no-edit --no-verify --quiet
+    echo "    OK (rerere auto-resolved)"
   else
     echo ""
     echo "*** CONFLICT merging $branch into local-integrated ***"
@@ -204,6 +207,12 @@ for branch in "${branches[@]}"; do
     git -C "$SCRIPT_DIR" update-ref refs/heads/local-integrated "$UPSTREAM_DEV"
     exit 1
   fi
+  if ! apply_post_merge_patch "$branch"; then
+    echo "Aborting and resetting local-integrated to upstream/dev."
+    git -C "$SCRIPT_DIR" update-ref refs/heads/local-integrated "$UPSTREAM_DEV"
+    exit 1
+  fi
+  ((++merged))
 done
 
 # --- Summary ---
