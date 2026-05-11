@@ -1,0 +1,42 @@
+From cab0a2065cbf63a1106883ec4d32926759365953 Mon Sep 17 00:00:00 2001
+From: Emanuel Ehmki <emanuel.ehmki@pfizer.com>
+Date: Tue, 28 Apr 2026 17:20:50 +0200
+Subject: [PATCH] session: restore Ripgrep.defaultLayer in prompt defaultLayer
+
+The skill-preamble auto-load helpers consume Ripgrep.Service via
+`const rg = yield* Ripgrep.Service` in session/prompt.ts, but the integrate
+merge for local/skill-preamble drops `Ripgrep.defaultLayer` from the
+Layer.mergeAll(...) block at the bottom of prompt.ts when reconciling
+imports with the earlier local/intelligent-session-watchdog merge. The
+import line for Ripgrep survives (the merge keeps it alongside Git/Skill/
+Glob) but the layer provision is lost, leaving the consumer unsatisfied
+and producing a runtime error on every opencode invocation:
+
+    Service not found: @opencode/Ripgrep
+
+Pre-catch-up local-integrated carried a `session: restore Ripgrep.defaultLayer
+in prompt` commit (053c94236a) that added this same line; that commit was
+not promoted to any standalone branch because the deletion happens only
+during integration, not on any source branch.
+
+This patch is applied automatically by rebuild-local-dev.sh AFTER the
+local/skill-preamble merge, restoring Ripgrep.defaultLayer to the
+Layer.mergeAll(...) provide chain alongside Skill.defaultLayer, Git.defaultLayer,
+and CrossSpawnSpawner.defaultLayer.
+---
+ packages/opencode/src/session/prompt.ts | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -1915,6 +1915,7 @@ export const defaultLayer = Layer.suspend(() =>
+         LLM.defaultLayer,
+         Git.defaultLayer,
+         Skill.defaultLayer,
++        Ripgrep.defaultLayer,
+         Bus.layer,
+         CrossSpawnSpawner.defaultLayer,
+       ),
+--
+2.0.0
