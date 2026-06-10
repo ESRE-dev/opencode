@@ -44,6 +44,19 @@ export const Info = Schema.Struct({
   // touched. See classify() and session/prompt.ts auto-load lifecycle.
   alwaysApply: Schema.Boolean.pipe(Schema.optional, Schema.withDecodingDefault(Effect.succeed(false))),
   globs: Schema.Array(Schema.String).pipe(Schema.optional, Schema.withDecodingDefault(Effect.succeed([] as string[]))),
+  // skill-preamble v2: `triggers` auto-load on a case-insensitive substring
+  // match against prompt/tool-output text; `markers` auto-load when a project
+  // file matches by full path or basename; `inject` selects the payload level
+  // (no decoded default — the effective default is computed by injectLevel()).
+  triggers: Schema.Array(Schema.String).pipe(
+    Schema.optional,
+    Schema.withDecodingDefault(Effect.succeed([] as string[])),
+  ),
+  markers: Schema.Array(Schema.String).pipe(
+    Schema.optional,
+    Schema.withDecodingDefault(Effect.succeed([] as string[])),
+  ),
+  inject: Schema.optional(Schema.Literals(["full", "preamble"])),
 })
 export type Info = Schema.Schema.Type<typeof Info>
 
@@ -55,15 +68,26 @@ const Issue = Schema.StructWithRest(
   [Schema.Record(Schema.String, Schema.Unknown)],
 )
 
-function isSkillFrontmatter(
-  data: unknown,
-): data is { name: string; description?: string; alwaysApply?: boolean; globs?: string[] } {
+function isSkillFrontmatter(data: unknown): data is {
+  name: string
+  description?: string
+  alwaysApply?: boolean
+  globs?: string[]
+  triggers?: string[]
+  markers?: string[]
+  inject?: "full" | "preamble"
+} {
   return (
     isRecord(data) &&
     typeof data.name === "string" &&
     (data.description === undefined || typeof data.description === "string") &&
     (data.alwaysApply === undefined || typeof data.alwaysApply === "boolean") &&
-    (data.globs === undefined || (Array.isArray(data.globs) && data.globs.every((g) => typeof g === "string")))
+    (data.globs === undefined || (Array.isArray(data.globs) && data.globs.every((g) => typeof g === "string"))) &&
+    (data.triggers === undefined ||
+      (Array.isArray(data.triggers) && data.triggers.every((t) => typeof t === "string"))) &&
+    (data.markers === undefined ||
+      (Array.isArray(data.markers) && data.markers.every((m) => typeof m === "string"))) &&
+    (data.inject === undefined || data.inject === "full" || data.inject === "preamble")
   )
 }
 
@@ -147,6 +171,9 @@ const add = Effect.fnUntraced(function* (state: State, match: string, events: Ev
     content: md.content,
     alwaysApply: md.data.alwaysApply ?? false,
     globs: md.data.globs ?? [],
+    triggers: md.data.triggers ?? [],
+    markers: md.data.markers ?? [],
+    inject: md.data.inject,
   }
 })
 
@@ -293,6 +320,9 @@ const layer = Layer.effect(
           content: CUSTOMIZE_OPENCODE_SKILL_BODY,
           alwaysApply: false,
           globs: [],
+          triggers: [],
+          markers: [],
+          inject: undefined,
         }
         yield* loadSkills(s, yield* InstanceState.get(discovered), events)
         return s
@@ -364,14 +394,33 @@ export const node = LayerNode.make({
   deps: [Discovery.node, Config.node, EventV2Bridge.node, FSUtil.node, Global.node, RuntimeFlags.node],
 })
 
-export function classify(skill: Info, files: string[]): "auto" | "on-demand" {
+export function classify(skill: Info, signals: { files: string[]; text?: string }): "auto" | "on-demand" {
   if (skill.alwaysApply) return "auto"
   for (const pattern of skill.globs ?? []) {
-    for (const file of files) {
+    for (const file of signals.files) {
       if (Glob.match(pattern, file)) return "auto"
     }
   }
+  for (const marker of skill.markers ?? []) {
+    for (const file of signals.files) {
+      if (file === marker || path.basename(file) === marker) return "auto"
+    }
+  }
+  const triggers = skill.triggers ?? []
+  if (triggers.length > 0 && signals.text) {
+    const haystack = signals.text.toLowerCase()
+    for (const trigger of triggers) {
+      if (haystack.includes(trigger.toLowerCase())) return "auto"
+    }
+  }
   return "on-demand"
+}
+
+// skill-preamble v2: the effective payload level for an auto-loaded skill.
+// Defaults to "full" for always-on skills (preserves v1) and "preamble"
+// otherwise; an explicit `inject` frontmatter field overrides both.
+export function injectLevel(skill: Info): "full" | "preamble" {
+  return skill.inject ?? (skill.alwaysApply ? "full" : "preamble")
 }
 
 export * as Skill from "."

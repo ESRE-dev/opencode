@@ -45,12 +45,16 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   bypassAgentCheck: boolean
   messages: SessionV1.WithParts[]
   promptOps: TaskPromptOps
-  // skill-preamble: skills already auto-loaded for this session. Threaded into
-  // Tool.Context.extra so the skill tool can no-op a redundant model call.
-  loadedSkills?: Set<string>
+  // skill-preamble: skills already auto-loaded for this session, mapped to
+  // their payload level. Threaded into Tool.Context.extra so the skill tool
+  // can no-op a redundant model call (only when already loaded at "full").
+  loadedSkills?: Map<string, "preamble" | "full">
   // skill-preamble: invoked after a file-touching tool (read/write/edit) runs,
   // so the session layer can glob-match and auto-load skills for that file.
   onFileTool?: (filePath: string) => Effect.Effect<void>
+  // skill-preamble v2: invoked after any tool completes successfully, so the
+  // session layer can scan the tool output for skills' trigger phrases.
+  onToolOutput?: (tool: string, output: string) => Effect.Effect<void>
 }) {
   const tools: Record<string, AITool> = {}
   const run = yield* EffectBridge.make()
@@ -123,6 +127,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               typeof (args as { filePath?: unknown }).filePath === "string"
             ) {
               yield* input.onFileTool((args as { filePath: string }).filePath)
+            }
+            if (input.onToolOutput && typeof result.output === "string") {
+              yield* input.onToolOutput(item.id, result.output)
             }
             const output = {
               ...result,
@@ -479,6 +486,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             ...result.metadata,
             truncated: truncated.truncated,
             ...(truncated.truncated && { outputPath: truncated.outputPath }),
+          }
+
+          if (input.onToolOutput && typeof truncated.content === "string") {
+            yield* input.onToolOutput(key, truncated.content)
           }
 
           const output = {
