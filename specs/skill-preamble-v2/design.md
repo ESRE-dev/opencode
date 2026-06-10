@@ -29,7 +29,6 @@ existing always-on skills), **`preamble` otherwise**.
   ```
   <skill_preamble name="NAME">
   NAME: DESCRIPTION
-  Base directory: BASE
   This is an availability notice only — the skill tool has NOT been
   called for "NAME" and its full instructions are NOT in context.
   Call the skill tool with name "NAME" to load them when relevant;

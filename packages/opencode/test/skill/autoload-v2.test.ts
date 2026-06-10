@@ -1,6 +1,4 @@
 import { describe, test, expect } from "bun:test"
-import { pathToFileURL } from "url"
-import path from "path"
 import { Skill } from "../../src/skill"
 
 // Minimal Skill.Info factory. classify() and injectLevel() are pure functions
@@ -81,12 +79,9 @@ describe("preamble payload shape", () => {
   // Mirror of session/prompt.ts buildPreamble() — kept in lockstep with the
   // design's <skill_preamble> template.
   function buildPreamble(s: Skill.Info) {
-    const dir = path.dirname(s.location)
-    const base = pathToFileURL(dir).href
     return [
       `<skill_preamble name="${s.name}">`,
       `${s.name}: ${s.description ?? ""}`,
-      `Base directory: ${base}`,
       `This is an availability notice only — the skill tool has NOT been`,
       `called for "${s.name}" and its full instructions are NOT in context.`,
       `Call the skill tool with name "${s.name}" to load them when relevant;`,
@@ -105,7 +100,10 @@ describe("preamble payload shape", () => {
     const out = buildPreamble(skill)
     expect(out).toContain(`<skill_preamble name="aws-iam-debug">`)
     expect(out).toContain("aws-iam-debug: Debug AWS IAM access errors.")
-    expect(out).toContain("Base directory:")
+    // No path/base-dir in the preamble — it baits models into read()ing the
+    // SKILL.md instead of calling the skill tool.
+    expect(out).not.toContain("Base directory:")
+    expect(out).not.toContain("file://")
     expect(out).toContain("skill tool")
     expect(out).toContain(`name "aws-iam-debug"`)
     // Anti-illusion notice: the model must not believe the skill tool was
