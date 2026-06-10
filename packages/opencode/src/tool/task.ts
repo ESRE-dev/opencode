@@ -84,7 +84,7 @@ function renderOutput(input: {
  * final text part — so the parent doesn't silently lose everything.
  */
 function childText(
-  result: MessageV2.WithParts,
+  result: SessionV1.WithParts,
   sessionId: string,
   sessions: Session.Interface,
   opts?: { parentAborted?: boolean },
@@ -121,7 +121,9 @@ function childText(
 
     // 2. Walk backwards through earlier messages for the last substantive text
     if (!lines.length) {
-      const msgs = yield* sessions.messages({ sessionID: SessionID.make(sessionId), limit: 10 })
+      const msgs = yield* sessions
+        .messages({ sessionID: SessionID.make(sessionId), limit: 10 })
+        .pipe(Effect.orElseSucceed(() => [] as SessionV1.WithParts[]))
       for (let i = msgs.length - 1; i >= 0; i--) {
         const m = msgs[i]
         if (m.info.role !== "assistant" || m.info.id === result.info.id) continue
