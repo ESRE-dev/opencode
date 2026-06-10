@@ -21,6 +21,16 @@
 #     (live path) and compact-v2 to-llm-message.ts. Branch ref retained;
 #     archived at tag archive/compaction-thinking-signature-2026-06-10.
 #
+# DEFERRED branches (BLOCKED — re-add after follow-up work):
+#   - local/intelligent-session-watchdog: deferred 2026-06-10 (cycle
+#     opencode-k4t). Feature is unique (no upstream equivalent) but its
+#     source references upstream modules reorganized away (storage
+#     reorg, Promise->Effect migration); a faithful port is a large
+#     re-implementation, not a rebase. Excluded from this rebuild to keep
+#     local-integrated buildable. Branch ref unchanged at its pre-cycle
+#     tip; rerere has cached ~5 commits of resolutions. Re-add after the
+#     deep port — see bd opencode-k4t.4.
+#
 # CLEAN-vs-MANUAL verdicts (Phase 1 of 2026-04-27 catch-up) are recorded
 # in specs/2026-04-27-upstream-catchup/plans/local-<name>.md and the
 # bd epic opencode-dby.
@@ -31,7 +41,6 @@
 
 local/cancel-propagation
 local/subagent-hardening
-local/intelligent-session-watchdog
 local/tool-timeout
 local/provider-fallback
 local/compaction-agent-identity
