@@ -40,17 +40,6 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 index 8b968ecb50..3db29009b9 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -1390,7 +1390,9 @@ export const layer = Layer.effect(
-               const auto = permitted.filter((s: Skill.Info) => Skill.classify(s, ss3.files) === "auto")
-               if (auto.length > 0) {
-                 yield* inject(sessionID, auto, ss3.loaded, lastUser.id)
--                msgs = yield* MessageV2.filterCompactedEffect(sessionID)
-+                msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
-+                  Effect.provideService(Database.Service, database),
-+                )
-               }
-             }
-           }
 @@ -1757,9 +1759,9 @@ export const defaultLayer = Layer.suspend(() =>
      Layer.provide(Session.defaultLayer),
      Layer.provide(SessionRevert.defaultLayer),
