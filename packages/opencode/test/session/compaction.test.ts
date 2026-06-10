@@ -293,6 +293,9 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
     Layer.provide(options?.config ?? Config.defaultLayer),
     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
     Layer.provide(EventV2Bridge.defaultLayer),
+    // (opencode-k4t) SessionCompaction.layer now depends on Todo.Service for
+    // post-compaction context injection (compaction-todo feature).
+    Layer.provide(Todo.defaultLayer),
   )
 }
 
@@ -1368,6 +1371,9 @@ describe("session.compaction.process", () => {
           (item) => item.info.role === "assistant" && item.info.summary,
         )
 
+        // (opencode-k4t) compaction-agent-identity downgraded the "Tool call not
+        // allowed while generating summary" throw to a logged warning, so the tool
+        // call is dropped and the summary still completes instead of erroring.
         expect(summary?.info.role).toBe("assistant")
         expect(summary?.parts.some((part) => part.type === "tool")).toBe(false)
       }).pipe(withCompaction({ llm: stub.layer }))
