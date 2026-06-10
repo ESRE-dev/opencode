@@ -219,13 +219,13 @@ export const layer = Layer.effect(
     // skill-preamble v2: emit only a stub that advertises the skill and tells
     // the model to upgrade on demand via the existing skill tool. No skill
     // body, no file listing.
+    // Deliberately no base-directory/file-path here: advertising the path baits
+    // models into `read`ing SKILL.md instead of calling the skill tool (observed
+    // live with haiku). The skill tool provides the base dir on upgrade.
     function buildPreamble(s: Skill.Info) {
-      const dir = path.dirname(s.location)
-      const base = pathToFileURL(dir).href
       return [
         `<skill_preamble name="${s.name}">`,
         `${s.name}: ${s.description ?? ""}`,
-        `Base directory: ${base}`,
         `This is an availability notice only — the skill tool has NOT been`,
         `called for "${s.name}" and its full instructions are NOT in context.`,
         `Call the skill tool with name "${s.name}" to load them when relevant;`,
