@@ -152,7 +152,7 @@ export const layer = Layer.effect(
     })
 
     type SkillState = {
-      loaded: Set<string>
+      loaded: Map<string, "preamble" | "full">
       touched: Set<string>
       files: string[]
     }
@@ -172,10 +172,21 @@ export const layer = Layer.effect(
       }),
     )
 
+    // skill-preamble v2: the joined text of the last user message's text parts,
+    // used as the `text` signal for trigger-phrase classification.
+    function lastUserText(messages: SessionV1.WithParts[]): string {
+      const last = messages.findLast((m) => m.info.role === "user")
+      if (!last) return ""
+      return last.parts
+        .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
+        .map((p) => p.text)
+        .join("\n")
+    }
+
     function getSkillState(map: SkillStateMap, sid: string): SkillState {
       let ss = map.sessions.get(sid)
       if (!ss) {
-        ss = { loaded: new Set(), touched: new Set(), files: map.files }
+        ss = { loaded: new Map(), touched: new Set(), files: map.files }
         map.sessions.set(sid, ss)
       }
       return ss
@@ -205,20 +216,42 @@ export const layer = Layer.effect(
       ].join("\n")
     })
 
+    // skill-preamble v2: emit only a stub that advertises the skill and tells
+    // the model to upgrade on demand via the existing skill tool. No skill
+    // body, no file listing.
+    function buildPreamble(s: Skill.Info) {
+      const dir = path.dirname(s.location)
+      const base = pathToFileURL(dir).href
+      return [
+        `<skill_preamble name="${s.name}">`,
+        `${s.name}: ${s.description ?? ""}`,
+        `Base directory: ${base}`,
+        `This skill matched the current context. Use the skill tool with`,
+        `name "${s.name}" to load its full instructions when relevant.`,
+        `</skill_preamble>`,
+      ].join("\n")
+    }
+
     // skill-preamble: emit a synthetic assistant message + completed skill
     // tool-result so an auto-loaded skill enters the model's context without a
     // model-issued tool-call. Mirrors the shape the skill tool produces.
+    // v2: each skill is injected at its effective level (full vs preamble);
+    // a skill already recorded at "full" or at its target level is skipped,
+    // while a preamble→full upgrade is allowed.
     const inject = Effect.fn("SessionPrompt.injectSkills")(function* (
       sessionID: SessionID,
       skills: Skill.Info[],
-      loaded: Set<string>,
+      loaded: Map<string, "preamble" | "full">,
       parentID: MessageID,
     ) {
       const ctx = yield* InstanceState.context
       for (const s of skills) {
-        if (loaded.has(s.name)) continue
+        const target = Skill.injectLevel(s)
+        const current = loaded.get(s.name)
+        if (current === "full" || current === target) continue
         const id = ulid()
-        const content = yield* buildContent(s)
+        const content = target === "full" ? yield* buildContent(s) : buildPreamble(s)
+        const title = target === "full" ? `Loaded skill: ${s.name}` : `Skill available: ${s.name}`
         const now = Date.now()
         const msg: SessionV1.Assistant = {
           id: MessageID.ascending(),
@@ -247,12 +280,12 @@ export const layer = Layer.effect(
             status: "completed",
             input: { name: s.name },
             output: content,
-            title: `Loaded skill: ${s.name}`,
+            title,
             metadata: { name: s.name, dir: path.dirname(s.location) },
             time: { start: now, end: now },
           },
         } satisfies SessionV1.ToolPart)
-        loaded.add(s.name)
+        loaded.set(s.name, target)
       }
     })
 
@@ -1346,8 +1379,9 @@ export const layer = Layer.effect(
             const compAgent = yield* agents.get(lastUser.agent)
             if (compAgent) {
               const union = [...new Set([...ssMap2.files, ...ss2.touched])]
+              const text = lastUserText(msgs)
               const permitted = yield* skill.available(compAgent)
-              const auto = permitted.filter((s: Skill.Info) => Skill.classify(s, union) === "auto")
+              const auto = permitted.filter((s: Skill.Info) => Skill.classify(s, { files: union, text }) === "auto")
               if (auto.length > 0) {
                 yield* inject(sessionID, auto, ss2.loaded, lastUser.id)
               }
@@ -1382,11 +1416,14 @@ export const layer = Layer.effect(
             const ssMap3 = yield* InstanceState.get(skillState)
             const ss3 = getSkillState(ssMap3, sessionID)
             if (ss3.loaded.size === 0) {
+              const text = lastUserText(msgs)
               const permitted = yield* skill.available(agent)
-              const auto = permitted.filter((s: Skill.Info) => Skill.classify(s, ss3.files) === "auto")
+              const auto = permitted.filter((s: Skill.Info) => Skill.classify(s, { files: ss3.files, text }) === "auto")
               if (auto.length > 0) {
                 yield* inject(sessionID, auto, ss3.loaded, lastUser.id)
-                msgs = yield* MessageV2.filterCompactedEffect(sessionID)
+                msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
+                  Effect.provideService(Database.Service, database),
+                )
               }
             }
           }
@@ -1466,6 +1503,24 @@ export const layer = Layer.effect(
                   yield* inject(sessionID, matched, toolSkillState.loaded, handle.message.id)
                 }
               }),
+              // skill-preamble v2: after any tool (except skill itself) runs,
+              // scan its output for not-yet-loaded skills' trigger phrases and
+              // auto-load matches at each skill's own payload level. inject()
+              // dedup handles skills already present at the target level.
+              onToolOutput: Effect.fn("SessionPrompt.onToolOutput")(function* (toolName: string, output: string) {
+                if (toolName === "skill") return
+                const haystack = output.slice(0, 16384).toLowerCase()
+                const permitted = yield* skill.available(agent)
+                const matched = permitted.filter(
+                  (s) =>
+                    toolSkillState.loaded.get(s.name) !== "full" &&
+                    (s.triggers ?? []).length > 0 &&
+                    (s.triggers ?? []).some((t) => haystack.includes(t.toLowerCase())),
+                )
+                if (matched.length > 0) {
+                  yield* inject(sessionID, matched, toolSkillState.loaded, handle.message.id)
+                }
+              }),
             }).pipe(
               Effect.provideService(Plugin.Service, plugin),
               Effect.provideService(Permission.Service, permission),
@@ -1508,8 +1563,14 @@ export const layer = Layer.effect(
 
             const sksMap = yield* InstanceState.get(skillState)
             const sks = getSkillState(sksMap, sessionID)
+            // Exclude only fully-loaded skills from the available-skills listing;
+            // preamble-loaded skills stay listed so the model can still upgrade
+            // them on demand.
+            const excludeFromListing = new Set(
+              [...sks.loaded].filter(([, level]) => level === "full").map(([name]) => name),
+            )
             const [skills, env, instructions, modelMsgs] = yield* Effect.all([
-              sys.skills(agent, sks.loaded),
+              sys.skills(agent, excludeFromListing),
               sys.environment(model),
               instruction.system().pipe(Effect.orDie),
               MessageV2.toModelMessagesEffect(msgs, model),
