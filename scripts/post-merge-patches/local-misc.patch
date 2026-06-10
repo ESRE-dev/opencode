@@ -1,0 +1,75 @@
+diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
+index 822c80458c..dea5e366be 100644
+--- a/packages/core/src/ripgrep.ts
++++ b/packages/core/src/ripgrep.ts
+@@ -8,6 +8,7 @@ import { FSUtil } from "./fs-util"
+ import { AppProcess, collectStream, waitForAbort } from "./process"
+ import { NonNegativeInt, PositiveInt, RelativePath } from "./schema"
+ import { RipgrepBinary } from "./ripgrep/binary"
++import { LayerNode } from "./effect/layer-node"
+ 
+ /**
+  * Small core-owned ripgrep execution adapter. It deliberately exposes raw
+@@ -285,3 +286,5 @@ export const layer = Layer.effect(
+ )
+ 
+ export const defaultLayer = layer.pipe(Layer.provide(Layer.merge(RipgrepBinary.defaultLayer, AppProcess.defaultLayer)))
++
++export const node = LayerNode.make(layer, [RipgrepBinary.node, AppProcess.node])
+diff --git a/packages/core/src/ripgrep/binary.ts b/packages/core/src/ripgrep/binary.ts
+index 013e9fc910..ea1e956616 100644
+--- a/packages/core/src/ripgrep/binary.ts
++++ b/packages/core/src/ripgrep/binary.ts
+@@ -7,6 +7,8 @@ import { CrossSpawnSpawner } from "../cross-spawn-spawner"
+ import { FSUtil } from "../fs-util"
+ import { Global } from "../global"
+ import { which } from "../util/which"
++import { LayerNode } from "../effect/layer-node"
++import { httpClient } from "../effect/layer-node-platform"
+ 
+ export namespace RipgrepBinary {
+   const VERSION = "15.1.0"
+@@ -127,4 +129,6 @@ export namespace RipgrepBinary {
+     Layer.provide(FSUtil.defaultLayer),
+     Layer.provide(CrossSpawnSpawner.defaultLayer),
+   )
++
++  export const node = LayerNode.make(layer, [httpClient, FSUtil.node, CrossSpawnSpawner.node])
+ }
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 8b968ecb50..3db29009b9 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -1390,7 +1390,9 @@ export const layer = Layer.effect(
+               const auto = permitted.filter((s: Skill.Info) => Skill.classify(s, ss3.files) === "auto")
+               if (auto.length > 0) {
+                 yield* inject(sessionID, auto, ss3.loaded, lastUser.id)
+-                msgs = yield* MessageV2.filterCompactedEffect(sessionID)
++                msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
++                  Effect.provideService(Database.Service, database),
++                )
+               }
+             }
+           }
+@@ -1757,9 +1759,9 @@ export const defaultLayer = Layer.suspend(() =>
+     Layer.provide(Session.defaultLayer),
+     Layer.provide(SessionRevert.defaultLayer),
+     Layer.provide(SessionSummary.defaultLayer),
+-    Layer.provide(Image.defaultLayer),
+     Layer.provide(
+       Layer.mergeAll(
++        Image.defaultLayer,
+         Agent.defaultLayer,
+         Database.defaultLayer,
+         SystemPrompt.defaultLayer,
+@@ -1905,6 +1907,10 @@ export const node = LayerNode.make(layer, [
+   EventV2Bridge.node,
+   RuntimeFlags.node,
+   Database.node,
++  Question.node,
++  Git.node,
++  Skill.node,
++  Ripgrep.node,
+ ])
+ 
+ export * as SessionPrompt from "./prompt"
