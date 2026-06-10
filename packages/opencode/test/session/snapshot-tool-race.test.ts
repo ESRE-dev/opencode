@@ -158,6 +158,10 @@ function makeHttp() {
     TestLLMServer.layer,
     SessionSummary.defaultLayer,
     SessionPrompt.layer.pipe(
+      // (opencode-k4t): provide services added by skill-preamble/question integration
+      Layer.provide(Skill.defaultLayer),
+      Layer.provide(Git.defaultLayer),
+      Layer.provide(Ripgrep.defaultLayer),
       Layer.provide(SessionRevert.defaultLayer),
       Layer.provide(Image.defaultLayer),
       Layer.provide(SessionSummary.defaultLayer),
