@@ -44,7 +44,7 @@ import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
 import { useEditorContext } from "../../context/editor"
 import { openEditor } from "../../editor"
-import { useDialog } from "../../ui/dialog"
+import { useDialog, type DialogContext } from "../../ui/dialog"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { TodoItem } from "../../component/todo-item"
 import { DialogMessage } from "./dialog-message"
@@ -776,7 +776,7 @@ export function Session() {
       title: showHeader() ? "Hide header" : "Show header",
       value: "session.toggle.header",
       category: "Session",
-      onSelect: (dialog) => {
+      onSelect: (dialog: DialogContext) => {
         setShowHeader((prev) => !prev)
         dialog.clear()
       },
