@@ -343,6 +343,10 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
       "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
       "type": "string",
     },
+    "timeout": {
+      "description": "Optional timeout in seconds for zombie/stall protection. Default: 4 hours. Minimum: 30 minutes. You almost never need to set this — only override if you have a specific reason.",
+      "type": "number",
+    },
   },
   "required": [
     "description",

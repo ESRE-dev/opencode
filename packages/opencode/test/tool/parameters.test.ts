@@ -47,6 +47,7 @@ describe("tool parameters", () => {
     test("question", () => expect(toJsonSchema(Question)).toMatchSnapshot())
     test("read", () => expect(toJsonSchema(Read)).toMatchSnapshot())
     test("skill", () => expect(toJsonSchema(Skill)).toMatchSnapshot())
+    // (opencode-k4t): tool-timeout intentionally added optional timeout (seconds) param to task wire shape
     test("task", () => expect(toJsonSchema(Task)).toMatchSnapshot())
     test("todo", () => expect(toJsonSchema(Todo)).toMatchSnapshot())
     test("webfetch", () => expect(toJsonSchema(WebFetch)).toMatchSnapshot())
