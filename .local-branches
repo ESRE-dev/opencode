@@ -11,15 +11,23 @@
 # Cross-branch dependencies (surfaced by 2026-04-27 catch-up Phase 1):
 #   - local/compaction-todo depends on local/compaction-agent-identity
 #     (consumes its buildIdentityReinforcement helper)
-#   - local/compaction-thinking-signature depends on the post-conversion
-#     loop owned by the compaction stack (.filter extends a loop those
-#     branches own / re-establish on the new upstream shape)
 #   - local/compaction-todo's watchdog/spawn.ts edits depend on
 #     local/intelligent-session-watchdog being in place
+#
+# DROPPED branches:
+#   - local/compaction-thinking-signature: removed 2026-06-10 (cycle
+#     opencode-k4t) as OBSOLETE. Upstream PR #25303 (29ec07700c) now
+#     strips reasoning parts on model mismatch in message-v2.ts:373-380
+#     (live path) and compact-v2 to-llm-message.ts. Branch ref retained;
+#     archived at tag archive/compaction-thinking-signature-2026-06-10.
 #
 # CLEAN-vs-MANUAL verdicts (Phase 1 of 2026-04-27 catch-up) are recorded
 # in specs/2026-04-27-upstream-catchup/plans/local-<name>.md and the
 # bd epic opencode-dby.
+#
+# 2026-06-10 catch-up (cycle opencode-k4t, +2060 commits onto ab701d20eb):
+# fresh obsolescence verdicts + per-branch rebase plans live in bd epic
+# opencode-k4t (children .1-.13).
 
 local/cancel-propagation
 local/subagent-hardening
@@ -28,7 +36,6 @@ local/tool-timeout
 local/provider-fallback
 local/compaction-agent-identity
 local/compaction-todo
-local/compaction-thinking-signature
 local/skill-preamble
 local/tui-navigation
 local/build-command
