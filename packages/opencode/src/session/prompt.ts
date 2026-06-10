@@ -242,8 +242,10 @@ const layer = Layer.effect(
         `<skill_preamble name="${s.name}">`,
         `${s.name}: ${s.description ?? ""}`,
         `Base directory: ${base}`,
-        `This skill matched the current context. Use the skill tool with`,
-        `name "${s.name}" to load its full instructions when relevant.`,
+        `This is an availability notice only — the skill tool has NOT been`,
+        `called for "${s.name}" and its full instructions are NOT in context.`,
+        `Call the skill tool with name "${s.name}" to load them when relevant;`,
+        `that call will return the full content (it has not happened yet).`,
         `</skill_preamble>`,
       ].join("\n")
     }
@@ -294,7 +296,10 @@ const layer = Layer.effect(
           tool: "skill",
           state: {
             status: "completed",
-            input: { name: s.name },
+            // For preamble level the input is deliberately distinguishable from a
+            // real `skill` call ({ name }) so the model does not conclude it
+            // already called the tool and got only a stub back.
+            input: target === "full" ? { name: s.name } : { name: s.name, preamble: true },
             output: content,
             title,
             metadata: { name: s.name, dir: path.dirname(s.location) },

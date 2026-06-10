@@ -30,13 +30,24 @@ existing always-on skills), **`preamble` otherwise**.
   <skill_preamble name="NAME">
   NAME: DESCRIPTION
   Base directory: BASE
-  This skill matched the current context. Use the skill tool with
-  name "NAME" to load its full instructions when relevant.
+  This is an availability notice only — the skill tool has NOT been
+  called for "NAME" and its full instructions are NOT in context.
+  Call the skill tool with name "NAME" to load them when relevant;
+  that call will return the full content (it has not happened yet).
   </skill_preamble>
   ```
 
   No skill body, no file listing. The model upgrades on demand via the
   EXISTING skill tool.
+
+  Anti-illusion rule (added after live testing): because the stub is
+  delivered as a synthetic *completed `skill` tool-call*, a model can
+  conclude it already called the tool and "got only a preamble back",
+  and will then refuse to call it again (observed live: Haiku fell back
+  to `read` on the SKILL.md). Therefore (a) the stub text must state
+  explicitly that the tool has NOT been called, and (b) the synthetic
+  part's `input` is `{ name, preamble: true }` — deliberately
+  distinguishable from a real call's `{ name }`.
 
 ### Loaded-level tracking
 

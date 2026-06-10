@@ -87,8 +87,10 @@ describe("preamble payload shape", () => {
       `<skill_preamble name="${s.name}">`,
       `${s.name}: ${s.description ?? ""}`,
       `Base directory: ${base}`,
-      `This skill matched the current context. Use the skill tool with`,
-      `name "${s.name}" to load its full instructions when relevant.`,
+      `This is an availability notice only — the skill tool has NOT been`,
+      `called for "${s.name}" and its full instructions are NOT in context.`,
+      `Call the skill tool with name "${s.name}" to load them when relevant;`,
+      `that call will return the full content (it has not happened yet).`,
       `</skill_preamble>`,
     ].join("\n")
   }
@@ -106,6 +108,10 @@ describe("preamble payload shape", () => {
     expect(out).toContain("Base directory:")
     expect(out).toContain("skill tool")
     expect(out).toContain(`name "aws-iam-debug"`)
+    // Anti-illusion notice: the model must not believe the skill tool was
+    // already called and returned only this stub.
+    expect(out).toContain("has NOT been")
+    expect(out).toContain("not happened yet")
   })
 
   test("does NOT contain the skill body or a file listing", () => {
