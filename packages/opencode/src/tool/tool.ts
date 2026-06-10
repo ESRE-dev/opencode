@@ -138,7 +138,7 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           const ms = yield* Effect.promise(async () => {
             try {
               const { AppRuntime } = await import("@/effect/app-runtime")
-              const { Config } = await import("../config")
+              const { Config } = await import("@/config/config")
               return await AppRuntime.runPromise(Config.Service.use((svc) => svc.get())).then((cfg) =>
                 timeout({ tool: cfg.experimental?.tool_timeout }),
               )
