@@ -1353,6 +1353,9 @@ describe("session.compaction.process", () => {
           (item) => item.info.role === "assistant" && item.info.summary,
         )
 
+        // (opencode-k4t) compaction-agent-identity downgraded the "Tool call not
+        // allowed while generating summary" throw to a logged warning, so the tool
+        // call is dropped and the summary still completes instead of erroring.
         expect(summary?.info.role).toBe("assistant")
         expect(summary?.parts.some((part) => part.type === "tool")).toBe(false)
       }).pipe(withCompaction({ llm: stub.llmLayer }))

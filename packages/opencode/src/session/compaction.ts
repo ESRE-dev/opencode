@@ -11,6 +11,7 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
+import { Todo } from "./todo"
 
 import { Effect, Layer, Context } from "effect"
 import { InstanceState } from "@/effect/instance-state"
@@ -75,6 +76,20 @@ function completedCompactions(messages: SessionV1.WithParts[]) {
     if (userIndex === undefined) return []
     return [{ userIndex, assistantIndex, summary: summaryText(msg) }]
   })
+}
+
+export function formatTodos(todos: Todo.Info[]): string | undefined {
+  if (todos.length === 0) return undefined
+  const items = todos.map((t) => `- [${t.status}] (${t.priority}) ${t.content}`).join("\n")
+  return `\n\n## Current Task List\nThe agent is tracking the following tasks (persisted in the database — these survive compaction):\n${items}`
+}
+
+export function buildPostCompactionContext(reminder: string | undefined, todos: Todo.Info[]): string | undefined {
+  const todoSection = formatTodos(todos)
+  if (!reminder && !todoSection) return undefined
+  if (!reminder) return todoSection?.trimStart()
+  if (!todoSection) return reminder
+  return reminder + "\n\n" + todoSection.trimStart()
 }
 
 function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model }) {
@@ -170,6 +185,7 @@ const layer = Layer.effect(
     const provider = yield* Provider.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const todo = yield* Todo.Service
 
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: SessionV1.Assistant["tokens"]
@@ -345,13 +361,16 @@ const layer = Layer.effect(
         cfg,
         model,
       })
+      const todos = yield* todo.get(input.sessionID)
+      const todoSection = formatTodos(todos)
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
         { sessionID: input.sessionID, agent: userMessage.agent },
         { context: [], prompt: undefined },
       )
-      const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
+      const basePrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
+      const nextPrompt = todoSection ? basePrompt + todoSection : basePrompt
       // Resolve the source agent to preserve its identity during compaction.
       const source: Agent.Info | undefined = yield* agents.get(userMessage.agent)
       const system: string[] = []
@@ -455,8 +474,10 @@ const layer = Layer.effect(
       }
 
       if (result === "continue" && input.auto) {
-        // Compute post-compaction agent identity reminder for specialized agents.
+        // Compute post-compaction agent identity reminder + todo state.
+        // `source` is resolved earlier when building the system prompt.
         const reminder = buildIdentityReinforcement(userMessage.agent, source)
+        const postContext = buildPostCompactionContext(reminder, todos)
         if (replay) {
           const original = replay.info
           const replayMsg = yield* session.updateMessage({
@@ -483,14 +504,14 @@ const layer = Layer.effect(
               sessionID: input.sessionID,
             })
           }
-          if (reminder) {
+          if (postContext) {
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: replayMsg.id,
               sessionID: input.sessionID,
               type: "text",
               synthetic: true,
-              text: reminder,
+              text: postContext,
               time: { start: Date.now(), end: Date.now() },
             })
           }
@@ -541,7 +562,7 @@ const layer = Layer.effect(
               // This is not a stable plugin contract and may change or disappear.
               metadata: { compaction_continue: true },
               synthetic: true,
-              text: reminder ? text + "\n\n" + reminder : text,
+              text: postContext ? text + "\n\n" + postContext : text,
               time: {
                 start: Date.now(),
                 end: Date.now(),
@@ -604,6 +625,7 @@ export const node = LayerNode.make({
     Provider.node,
     EventV2Bridge.node,
     RuntimeFlags.node,
+    Todo.node,
   ],
 })
 
