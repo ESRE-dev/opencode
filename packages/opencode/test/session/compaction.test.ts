@@ -8,6 +8,8 @@ import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Config } from "@/config/config"
 import { LLM } from "../../src/session/llm"
+// TODO(opencode-k4t): re-port local identity assertions (buildIdentityReinforcement,
+// agent-role section, tool-call->text conversion) onto upstream's rewritten harness.
 import { SessionCompaction } from "../../src/session/compaction"
 import { Token } from "@/util/token"
 import { Plugin } from "../../src/plugin"
