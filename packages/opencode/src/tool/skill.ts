@@ -20,6 +20,23 @@ export const SkillTool = Tool.define(
       parameters: Parameters,
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
+          // skill-preamble idempotency guard: skills auto-loaded by the
+          // session prompt lifecycle are tracked in ctx.extra.loadedSkills,
+          // mapped to their payload level. Only short-circuit a model-issued
+          // call when the skill is already loaded at "full"; a "preamble"-level
+          // skill must proceed so the model receives the full content.
+          const loaded = ctx.extra?.loadedSkills as Map<string, "preamble" | "full"> | undefined
+          if (loaded?.get(params.name) === "full") {
+            return {
+              title: `Skill: ${params.name}`,
+              output: `Skill "${params.name}" is already loaded in this session.`,
+              metadata: {
+                name: params.name,
+                dir: "",
+              },
+            }
+          }
+
           const info = yield* skill
             .require(params.name)
             .pipe(Effect.catchTag("Skill.NotFoundError", (error) => Effect.die(new Error(error.message))))
@@ -41,6 +58,8 @@ export const SkillTool = Tool.define(
             signal: ctx.abort,
             limit: 10,
           })
+
+          loaded?.set(params.name, "full")
 
           return {
             title: `Loaded skill: ${info.name}`,
