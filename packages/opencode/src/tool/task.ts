@@ -78,6 +78,86 @@ function renderOutput(input: {
   ].join("\n")
 }
 
+/**
+ * Extract the child session's result text, recovering substantive work from
+ * tool outputs or session history when the child errored without producing a
+ * final text part — so the parent doesn't silently lose everything.
+ */
+function childText(
+  result: SessionV1.WithParts,
+  sessionId: string,
+  sessions: Session.Interface,
+  opts?: { parentAborted?: boolean },
+): Effect.Effect<string> {
+  if (result.info.role !== "assistant") return Effect.succeed("")
+  const error = result.info.error
+  if (error?.name === "MessageAbortedError") {
+    if (opts?.parentAborted) return Effect.succeed("Task was cancelled by user.")
+    return Effect.succeed(
+      [
+        `WATCHDOG: Subagent session (${sessionId}) was killed — tool execution exceeded maximum allowed duration.`,
+        `task_id: ${sessionId}`,
+        "",
+        "The subagent stalled (likely waiting on an external resource or internal deadlock).",
+        "Recommended: retry this task with a simpler or more focused prompt.",
+        "You can resume by passing the task_id above.",
+      ].join("\n"),
+    )
+  }
+  const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
+  if (text) return Effect.succeed(text)
+  if (!error) return Effect.succeed("")
+
+  return Effect.gen(function* () {
+    // The child errored with no text output. Recover substantive work from
+    // the session history so the parent doesn't lose everything.
+    const lines: string[] = []
+
+    // 1. Collect completed tool outputs from the errored message itself
+    for (const p of result.parts) {
+      if (p.type !== "tool" || p.state.status !== "completed") continue
+      lines.push(`[${p.state.title}]\n${p.state.output}`)
+    }
+
+    // 2. Walk backwards through earlier messages for the last substantive text
+    if (!lines.length) {
+      const msgs = yield* sessions
+        .messages({ sessionID: SessionID.make(sessionId), limit: 10 })
+        .pipe(Effect.orElseSucceed(() => [] as SessionV1.WithParts[]))
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i]
+        if (m.info.role !== "assistant" || m.info.id === result.info.id) continue
+        const prior = m.parts.findLast((x) => x.type === "text")?.text
+        if (prior) {
+          lines.push(prior)
+          break
+        }
+      }
+    }
+
+    const msg = error.data && "message" in error.data ? (error.data as { message: string }).message : error.name
+    const code =
+      error.data && "statusCode" in error.data ? ` (status ${(error.data as { statusCode: number }).statusCode})` : ""
+    const header = `ERROR: The subagent session (${sessionId}) failed with: ${error.name}${code}\n${msg}`
+
+    if (!lines.length) {
+      return [header, "", "You can retry this task by passing the task_id above, or try a different approach."].join(
+        "\n",
+      )
+    }
+
+    return [
+      "NOTE: The subagent errored after completing some work. Partial output below:",
+      "",
+      ...lines,
+      "",
+      header,
+      "",
+      "You can retry this task by passing the task_id above, or try a different approach.",
+    ].join("\n")
+  })
+}
+
 export const TaskTool = Tool.define(
   id,
   Effect.gen(function* () {
@@ -130,9 +210,13 @@ export const TaskTool = Tool.define(
         ...(next.permission.some((rule) => rule.permission === "todowrite")
           ? []
           : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
+        // Subagents never own a todo list, so reading one is meaningless noise.
+        { permission: "todoread" as const, pattern: "*" as const, action: "deny" as const },
         ...(next.permission.some((rule) => rule.permission === id)
           ? []
           : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
+        // Subagents (including nested ones) must not stall waiting on user input.
+        { permission: "question" as const, pattern: "*" as const, action: "deny" as const },
         ...(cfg.experimental?.primary_tools?.map((permission) => ({
           permission,
           pattern: "*" as const,
@@ -196,7 +280,7 @@ export const TaskTool = Tool.define(
           agent: next.name,
           parts,
         })
-        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        return yield* childText(result, nextSession.id, sessions, { parentAborted: ctx.abort.aborted })
       })
 
       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (

@@ -426,6 +426,17 @@ describe("tool.task", () => {
             pattern: "*",
             action: "deny",
           },
+          // (opencode-k4t): subagent-hardening intentionally added todoread + question denies
+          {
+            permission: "todoread",
+            pattern: "*",
+            action: "deny",
+          },
+          {
+            permission: "question",
+            pattern: "*",
+            action: "deny",
+          },
           {
             permission: "bash",
             pattern: "*",
