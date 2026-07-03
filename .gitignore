@@ -32,3 +32,19 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+# Scratch investigation notes
+scratch/
+
+# Beads / Dolt files (added by bd init)
+# Whole .beads/ tree is per-clone state — config, Dolt DB, and JSONL
+# backups all stay local. Backup goes to S3 via Dolt auto-push, never
+# git. See meta:BD_SETUP.md for the policy.
+.beads/
+.dolt/
+*.db
+.beads-credential-key
+
+# Machine-local AI agent config
+.claude/
+CLAUDE.md

@@ -1,6 +1,7 @@
 import { Effect, Schema } from "effect"
 import * as Tool from "./tool"
 import DESCRIPTION_WRITE from "./todowrite.txt"
+import DESCRIPTION_READ from "./todoread.txt"
 import { Todo } from "../session/todo"
 
 export const Parameters = Schema.Struct({
@@ -42,5 +43,41 @@ export const TodoWriteTool = Tool.define<typeof Parameters, Metadata, Todo.Servi
           }
         }),
     } satisfies Tool.DefWithoutID<typeof Parameters, Metadata>
+  }),
+)
+
+const Empty = Schema.Struct({})
+
+type ReadMetadata = {
+  todos: Todo.Info[]
+}
+
+export const TodoReadTool = Tool.define<typeof Empty, ReadMetadata, Todo.Service>(
+  "todoread",
+  Effect.gen(function* () {
+    const todo = yield* Todo.Service
+
+    return {
+      description: DESCRIPTION_READ,
+      parameters: Empty,
+      execute: (_params: Schema.Schema.Type<typeof Empty>, ctx: Tool.Context<ReadMetadata>) =>
+        Effect.gen(function* () {
+          yield* ctx.ask({
+            permission: "todoread",
+            patterns: ["*"],
+            always: ["*"],
+            metadata: {},
+          })
+
+          const todos = yield* todo.get(ctx.sessionID)
+          return {
+            title: `${todos.filter((x) => x.status !== "completed").length} todos`,
+            metadata: {
+              todos,
+            },
+            output: JSON.stringify(todos, null, 2),
+          }
+        }),
+    } satisfies Tool.DefWithoutID<typeof Empty, ReadMetadata>
   }),
 )
